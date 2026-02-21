@@ -1,0 +1,6 @@
+{
+  "API_BASE_URL": "http://recaudacion.epmapapal.test/api/mobile",
+  "MAP_API_KEY": "",
+  "NOTIFICATION_INTERVAL": "120",
+  "DEBUG": "true"
+}
