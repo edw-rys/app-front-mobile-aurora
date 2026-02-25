@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import '../../../core/config/app_config.dart';
 import '../../../core/constants/endpoints.dart';
 import '../../models/meter_model.dart';
@@ -64,8 +63,8 @@ class ApiService {
   Future<void> logout() async {
     try {
       await _dio.post(Endpoints.logout);
-    } catch (_) {
-      // Ignore logout errors - just clear local data
+    } catch (e) {
+      // ignore deletion errors
     }
   }
 
@@ -180,9 +179,8 @@ class ApiService {
     String rawBody = '';
     try {
       rawBody = String.fromCharCodes(response.data as List<int>);
-      debugPrint('[postReadingsImages] HTTP ${response.statusCode}: $rawBody');
-    } catch (e) {
-      debugPrint('[postReadingsImages] Could not decode response bytes: $e');
+    } catch (_) {
+      // ignore
     }
 
     // Manually throw if the status is an error so retries work
@@ -202,7 +200,7 @@ class ApiService {
         return payload.map((e) => e as Map<String, dynamic>).toList();
       }
     } catch (e) {
-      debugPrint('[postReadingsImages] failed to parse JSON: $e\nBody was: $rawBody');
+      // ignore JSON parse errors - return empty list
     }
     return [];
   }

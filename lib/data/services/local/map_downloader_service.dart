@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 class MapDownloaderService {
@@ -98,11 +97,8 @@ class MapDownloaderService {
           );
           successCount++;
         } catch (e) {
-          debugPrint('Failed to download $url: $e');
-          if (e is DioException && (e.type == DioExceptionType.connectionError || e.type == DioExceptionType.connectionTimeout)) {
-             // We don't necessarily want to kill the whole process for ONE tile failure
-             // unless it's a persistent connection issue.
-          }
+          // We don't necessarily want to kill the whole process for ONE tile failure
+          // unless it's a persistent connection issue.
         }
       }));
       

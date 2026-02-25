@@ -55,7 +55,6 @@ class AuthInterceptor extends Interceptor {
         err.requestOptions.path != Endpoints.refresh &&
         !_isRefreshing) {
       _isRefreshing = true;
-      debugPrint('[AuthInterceptor] Unauthenticated error detected. Path: ${err.requestOptions.path}');
       try {
         final refreshToken = await _prefsService.getRefreshToken();
         if (refreshToken == null || refreshToken.isEmpty) {
@@ -80,7 +79,6 @@ class AuthInterceptor extends Interceptor {
           ));
         }
 
-        debugPrint('[AuthInterceptor] Attempting token refresh...');
         final response = await refreshDio.post(Endpoints.refresh);
         final payload = response.data['payload'] as Map<String, dynamic>;
 
@@ -95,12 +93,10 @@ class AuthInterceptor extends Interceptor {
 
         // Retry the original request with new token
         err.requestOptions.headers['Authorization'] = 'Bearer $newAccessToken';
-        debugPrint('[AuthInterceptor] Refresh success. Retrying original request...');
         final retryResponse = await _dio.fetch(err.requestOptions);
         _isRefreshing = false;
         return handler.resolve(retryResponse);
       } catch (refreshErr) {
-        debugPrint('[AuthInterceptor] Refresh failed: $refreshErr');
         _isRefreshing = false;
         // Refresh failed → clear auth but KEEP readings
         await _forceLogout();

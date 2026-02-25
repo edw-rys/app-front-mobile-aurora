@@ -440,7 +440,6 @@ class MeterRepository {
             }
             success = true; // Batch succeeded
           } catch (e) {
-            debugPrint('Error uploading image batch (Attempt $attempts/$maxRetries): $e');
             if (attempts < maxRetries) {
               // Wait 2 seconds before retrying
               await Future.delayed(const Duration(seconds: 2));

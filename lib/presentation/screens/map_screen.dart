@@ -87,7 +87,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         }
       }
     } catch (e) {
-      debugPrint("Error checking location: $e");
+      // ignore
     } finally {
       if (mounted) setState(() => _isLocating = false);
     }
@@ -132,7 +132,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         _mapController.move(_userLocation!, 16);
       }
     } catch (e) {
-      debugPrint("Error getting location: $e");
+      // ignore
     } finally {
       if (mounted) setState(() => _isLocating = false);
     }
@@ -169,7 +169,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         setState(() => _routePoints = []);
       }
     } catch (e) {
-      debugPrint("Routing error: $e");
       setState(() => _routePoints = []);
     } finally {
       if (mounted) setState(() => _isRouting = false);
