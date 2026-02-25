@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import '../../core/utils/helpers.dart';
 import '../../core/exceptions/dio_exception_handler.dart';
 import '../models/meter_model.dart';
@@ -109,14 +111,30 @@ class MeterRepository {
     // Selective update
     await _dbService.updateMetersSelective(periodId, allApiMeters);
     
-    // Cleanup orphans
+    // Cleanup orphan meters
     final apiAbonados = allApiMeters.map((m) => m.nAbonado).toSet();
     await _dbService.removeOrphanMeters(periodId, apiAbonados);
     
+    // Delete orphan readings (not in API response) and their local images
+    final orphanImagePaths = await _dbService.deleteOrphanReadings(periodId, apiAbonados);
+    for (final path in orphanImagePaths) {
+      _deleteFileIfExists(path);
+    }
+
     // Update sectors
     await _saveUniqueSectors(periodId, allSectorsFromApi);
 
     return allApiMeters.length;
+  }
+
+  /// Silently delete a file from disk if it exists
+  void _deleteFileIfExists(String path) {
+    try {
+      final f = File(path);
+      if (f.existsSync()) f.deleteSync();
+    } catch (e) {
+      debugPrint('Could not delete image file $path: $e');
+    }
   }
 
   Future<void> _saveUniqueSectors(String periodId, List<SectorModel> allSectors) async {
@@ -350,12 +368,110 @@ class MeterRepository {
   }
 
 
+  /// Upload images for readings that have a local image path not yet synced.
+  /// Uploads dynamically in batches up to 50 images, ensuring max 2MB payload.
+  /// Implements automatic retries (up to 3) if a batch fails.
+  /// Returns number of images successfully uploaded.
+  Future<int> submitImagesToApi({
+    required List<ReadingModel> readingsWithImages,
+    required int parentId,
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    if (readingsWithImages.isEmpty) return 0;
+
+    final total = readingsWithImages.length;
+    int uploaded = 0;
+    int currentIdx = 0;
+    const int maxPayloadBytes = 2 * 1024 * 1024; // 2 MB limit
+    const int maxRetries = 3;
+    const int maxBatchSize = 50; // PHP max_file_uploads set to 100 on server
+
+    while (currentIdx < total) {
+      int take = maxBatchSize; // Try max batch size initially
+      List<ReadingModel> batch = [];
+      
+      // Dynamic chunking to fit within 2MB
+      while (take > 0) {
+        final end = (currentIdx + take).clamp(0, total);
+        batch = readingsWithImages.sublist(currentIdx, end);
+        
+        int totalBytes = 0;
+        for (final r in batch) {
+          if (r.localImagePath != null) {
+            try {
+              totalBytes += File(r.localImagePath!).lengthSync();
+            } catch (_) {}
+          }
+        }
+        
+        // If > 2MB and we can still reduce it, drop 5 images at a time
+        if (totalBytes > maxPayloadBytes && take > 5) {
+          take -= 5;
+        } else {
+          // Fits within 2MB, or we are at the minimum chunk size
+          break;
+        }
+      }
+
+      // Build the typed list for the API
+      final images = batch
+          .where((r) => r.localImagePath != null)
+          .map((r) => (nAbonado: r.nAbonado, imagePath: r.localImagePath!))
+          .toList();
+
+      if (images.isNotEmpty) {
+        bool success = false;
+        int attempts = 0;
+        
+        while (!success && attempts < maxRetries) {
+          attempts++;
+          try {
+            await _apiService.postReadingsImages(
+              readingPeriodId: parentId,
+              images: images,
+            );
+
+            // Mark each uploaded reading's image as synced
+            for (final r in batch) {
+              if (r.localImagePath != null) {
+                await _dbService.markImageAsSynced(r.nAbonado);
+                uploaded++;
+              }
+            }
+            success = true; // Batch succeeded
+          } catch (e) {
+            debugPrint('Error uploading image batch (Attempt $attempts/$maxRetries): $e');
+            if (attempts < maxRetries) {
+              // Wait 2 seconds before retrying
+              await Future.delayed(const Duration(seconds: 2));
+            }
+          }
+        }
+      }
+
+      currentIdx += batch.length;
+      onProgress?.call(currentIdx, total);
+
+      // Add a 1 second delay between requests to avoid overloading the server
+      if (currentIdx < total) {
+        await Future.delayed(const Duration(seconds: 1));
+      }
+    }
+
+    return uploaded;
+  }
+
+  /// Get readings that have a local image pending upload
+  Future<List<ReadingModel>> getReadingsWithPendingImages() async {
+    return _dbService.getReadingsWithPendingImages();
+  }
+
   /// Clear ALL local data (readings + meters) — delegated to DB
   Future<void> clearAllLocalData() async {
     await _dbService.clearAllData();
   }
 
-  /// Finish reading period
+  /// Finish reading period: calls the API and deletes all local image files.
   Future<String> finishPeriod() async {
     final parentId = await _prefsService.getParentId();
     if (parentId == null) throw Exception('No hay periodo activo.');
@@ -368,6 +484,13 @@ class MeterRepository {
       if (status != 'OK') {
         throw Exception(message);
       }
+
+      // Delete all local image files now that the period is closed
+      final imagePaths = await _dbService.getAllLocalImagePaths();
+      for (final path in imagePaths) {
+        _deleteFileIfExists(path);
+      }
+
       return message;
     } catch (e) {
       throw Exception(DioExceptionHandler.mapToString(e));

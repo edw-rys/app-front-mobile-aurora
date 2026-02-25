@@ -1,12 +1,18 @@
 import 'dart:async';
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../core/constants/app_colors.dart';
 import '../../data/models/meter_model.dart';
 import '../../data/models/reading_model.dart';
+import '../../data/services/local/image_compression_service.dart';
 import '../providers/meters_provider.dart';
 import '../../shared/widgets/sector_picker_sheet.dart';
+import '../widgets/camera_onboarding_sheet.dart';
+import '../../app/di/injection.dart';
+import '../../data/services/local/preferences_service.dart';
 
 /// Fast-entry meter list screen — matches mockup 6
 /// Inline reading input with auto-save debounce
@@ -28,14 +34,11 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
   @override
   void initState() {
     super.initState();
-    // Sync search controller with provider if already has data
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final filters = ref.read(meterFiltersProvider);
       if (filters.query.isNotEmpty) {
         _searchController.text = filters.query;
       }
-      
-      // If initialFilter is provided, it overrides provider status
       if (widget.initialFilter != null) {
         ref.read(meterFiltersProvider.notifier).setStatus(widget.initialFilter!);
       }
@@ -58,28 +61,18 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
     super.dispose();
   }
 
-  /// Scroll (in the current filtered list) to the next meter that has no reading.
   void _jumpToNextPending(List<MeterModel> filtered, MetersState s) {
     if (!_scrollController.hasClients) return;
-    const itemHeight = 135.0; // Approximate card height + margin
-    
-    // Calculate current visible index
+    const itemHeight = 145.0;
     int currentVisibleIdx = (_scrollController.offset / itemHeight).floor();
     if (currentVisibleIdx < 0) currentVisibleIdx = 0;
-
-    // Find next pending AFTER the currently visible item
     int nextIdx = filtered.indexWhere((m) => !s.readings.containsKey(m.nAbonado), currentVisibleIdx + 1);
-    
-    // If not found, wrap around and search from the beginning
     if (nextIdx < 0) {
       nextIdx = filtered.indexWhere((m) => !s.readings.containsKey(m.nAbonado));
     }
-    
     if (nextIdx < 0) return;
-
     final targetOffset = (itemHeight * nextIdx)
         .clamp(0.0, _scrollController.position.maxScrollExtent);
-        
     _scrollController.animateTo(
       targetOffset,
       duration: const Duration(milliseconds: 400),
@@ -92,18 +85,20 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
     final s = ref.watch(metersProvider);
     final filters = ref.watch(meterFiltersProvider);
     final filtered = ref.watch(filteredMetersProvider);
-    
-    // Recalculate counts based on sector
-    final sectorMeters = filters.sector == null 
-        ? s.meters 
+
+    final sectorMeters = filters.sector == null
+        ? s.meters
         : s.meters.where((m) => m.sector?.name == filters.sector!.name).toList();
-        
+
     final total = sectorMeters.length;
     final read = sectorMeters.where((m) => s.readings.containsKey(m.nAbonado)).length;
     final pending = sectorMeters.where((m) => !s.readings.containsKey(m.nAbonado)).length;
     final errors = sectorMeters.where((m) {
       final r = s.readings[m.nAbonado];
-      return r != null && (!r.isValid || r.syncError != null);
+      if (r == null) return false;
+      if (!r.isValid || r.syncError != null) return true;
+      if (s.requirePhoto && r.isValid && !r.hasLocalImage) return true;
+      return false;
     }).length;
 
     return Scaffold(
@@ -135,7 +130,6 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
                       ],
                     ),
                     const SizedBox(height: 10),
-                    // Search bar
                     TextField(
                       controller: _searchController,
                       onChanged: (val) => ref.read(meterFiltersProvider.notifier).setQuery(val),
@@ -161,7 +155,6 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
                       ),
                     ),
                     const SizedBox(height: 10),
-                    // Filter chips
                     SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(
@@ -179,7 +172,6 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
                       ),
                     ),
                     const SizedBox(height: 10),
-                    // Sector Filter (Searchable Picker)
                     if (s.sectors.isNotEmpty)
                       GestureDetector(
                         onTap: () {
@@ -234,7 +226,6 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
                         ),
                       ),
                     const SizedBox(height: 10),
-                    // Progress bar
                     Row(
                       children: [
                         const Text('Progreso diario',
@@ -291,6 +282,8 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
                       return _FastEntryCard(
                         meter: meter,
                         reading: reading,
+                        enablePhoto: s.enablePhoto,
+                        requirePhoto: s.requirePhoto,
                         onTap: () =>
                             context.push('/meters/${Uri.encodeComponent(meter.nAbonado)}'),
                         onSave: (r) =>
@@ -301,7 +294,6 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
           ),
         ],
       ),
-      // Jump to next pending FAB
       floatingActionButton: pending > 0
           ? FloatingActionButton.small(
               onPressed: () => _jumpToNextPending(filtered, s),
@@ -316,7 +308,7 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
     final filters = ref.watch(meterFiltersProvider);
     final selected = filters.status == value;
     final defaultBg = color ?? const Color(0xFF1E293B);
-    
+
     return GestureDetector(
       onTap: () => ref.read(meterFiltersProvider.notifier).setStatus(value),
       child: AnimatedContainer(
@@ -357,16 +349,20 @@ class _MeterListScreenState extends ConsumerState<MeterListScreen> {
   }
 }
 
-/// Individual fast-entry card with auto-save debounce
+/// Individual fast-entry card with auto-save debounce and optional photo support
 class _FastEntryCard extends StatefulWidget {
   final MeterModel meter;
   final ReadingModel? reading;
+  final bool enablePhoto;
+  final bool requirePhoto;
   final VoidCallback onTap;
   final Future<void> Function(ReadingModel) onSave;
 
   const _FastEntryCard({
     required this.meter,
     required this.reading,
+    required this.enablePhoto,
+    required this.requirePhoto,
     required this.onTap,
     required this.onSave,
   });
@@ -380,7 +376,9 @@ class _FastEntryCardState extends State<_FastEntryCard> {
   final FocusNode _focusNode = FocusNode();
   Timer? _debounce;
   bool _saving = false;
+  bool _savedSuccess = false;
   String? _inputError;
+  final _imageService = ImageCompressionService();
 
   @override
   void initState() {
@@ -389,9 +387,7 @@ class _FastEntryCardState extends State<_FastEntryCard> {
       text: widget.reading?.currentReading?.toString() ?? '',
     );
     _focusNode.addListener(() {
-      if (!_focusNode.hasFocus) {
-        _validateInputs();
-      }
+      if (!_focusNode.hasFocus) _validateInputs();
     });
   }
 
@@ -437,13 +433,18 @@ class _FastEntryCardState extends State<_FastEntryCard> {
 
   void _onChanged(String value) {
     _debounce?.cancel();
-    if (_inputError != null && mounted) {
-      setState(() => _inputError = null);
+    if (_inputError != null && mounted) setState(() => _inputError = null);
+
+    // When enablePhoto=true and requirePhoto=true, do NOT auto-save without image
+    if (widget.enablePhoto && widget.requirePhoto) {
+      // Require image before saving — no debounce save
+      return;
     }
+
     _debounce = Timer(const Duration(milliseconds: 1500), () => _save());
   }
 
-  Future<void> _save() async {
+  Future<void> _save({String? localImagePath}) async {
     _validateInputs();
     if (_inputError != null) return;
 
@@ -456,15 +457,64 @@ class _FastEntryCardState extends State<_FastEntryCard> {
     final reading = (widget.reading ?? ReadingModel(nAbonado: widget.meter.nAbonado)).copyWith(
       currentReading: val,
       localTimestamp: DateTime.now().toIso8601String(),
+      localImagePath: localImagePath,
     );
     try {
       await widget.onSave(reading);
+      if (mounted) {
+        setState(() => _savedSuccess = true);
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) setState(() => _savedSuccess = false);
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  /// Opens the device camera to capture a photo, compresses it, and saves
+  Future<void> _capturePhoto() async {
+    final status = await Permission.camera.status;
+    if (!status.isGranted) {
+      if (mounted) {
+        await CameraOnboardingSheet.show(context);
+      }
+      final newStatus = await Permission.camera.status;
+      if (!newStatus.isGranted) return;
+    }
+
+    final cameras = await availableCameras();
+    if (cameras.isEmpty || !mounted) return;
+
+    final result = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _CameraCapturePage(cameras: cameras),
+        fullscreenDialog: true,
+      ),
+    );
+
+    if (result == null || !mounted) return;
+
+    // Compress the image
+    setState(() => _saving = true);
+    try {
+      final compressed = await _imageService.compressAndSave(result);
+      // Now save with the image path
+      await _save(localImagePath: compressed);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al procesar imagen: $e')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
   bool get _isRead => widget.reading?.currentReading != null;
+  bool get _hasImage => widget.reading?.hasLocalImage ?? false;
 
   @override
   Widget build(BuildContext context) {
@@ -486,6 +536,7 @@ class _FastEntryCardState extends State<_FastEntryCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // ── Card header ─────────────────────────────────
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -498,7 +549,24 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                               ? const Color(0xFF475569)
                               : const Color(0xFF1E293B))),
                 ),
-                _StatusBadge(isRead: _isRead),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Small image indicator when photo captured
+                    if (widget.enablePhoto && _hasImage)
+                      Container(
+                        margin: const EdgeInsets.only(right: 6),
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF06B6D4).withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Icon(Icons.camera_alt_rounded,
+                            size: 13, color: Color(0xFF06B6D4)),
+                      ),
+                    _StatusBadge(isRead: _isRead),
+                  ],
+                ),
               ],
             ),
             const SizedBox(height: 4),
@@ -538,6 +606,8 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis),
             const SizedBox(height: 12),
+
+            // ── Input row ────────────────────────────────────
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -566,7 +636,10 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                         onEditingComplete: () {
                           _debounce?.cancel();
                           _focusNode.unfocus();
-                          _save();
+                          // Only auto-save on editing complete if no photo required
+                          if (!widget.enablePhoto || !widget.requirePhoto) {
+                            _save();
+                          }
                         },
                         style: TextStyle(
                           fontSize: 24,
@@ -584,17 +657,13 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                           errorStyle: const TextStyle(fontSize: 10, height: 0.8),
                           border: UnderlineInputBorder(
                             borderSide: BorderSide(
-                              color: _inputError != null
-                                  ? Colors.red
-                                  : (_isRead ? const Color(0xFF22C55E).withValues(alpha: 0.5) : const Color(0xFFE2E8F0)),
+                              color: _buildBorderColor(),
                               width: 2,
                             ),
                           ),
                           enabledBorder: UnderlineInputBorder(
                             borderSide: BorderSide(
-                              color: _inputError != null
-                                  ? Colors.red
-                                  : (_isRead ? const Color(0xFF22C55E).withValues(alpha: 0.5) : const Color(0xFFE2E8F0)),
+                              color: _buildBorderColor(),
                               width: 2,
                             ),
                           ),
@@ -606,41 +675,312 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                           contentPadding: const EdgeInsets.only(bottom: 4, top: 4),
                         ),
                       ),
+                      // Success indicator for !requirePhoto saves
+                      if (widget.enablePhoto && !widget.requirePhoto && _savedSuccess)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Row(
+                            children: [
+                              Icon(Icons.check_circle_rounded,
+                                  size: 13, color: AppColors.success),
+                              const SizedBox(width: 4),
+                              Text('Guardado',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      color: AppColors.success,
+                                      fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
                 ),
                 const SizedBox(width: 12),
-                GestureDetector(
-                  onTap: _isRead ? null : () { _debounce?.cancel(); _save(); },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _isRead
-                          ? const Color(0xFFDCFCE7)
-                          : AppColors.primary,
-                      boxShadow: _isRead
-                          ? []
-                          : [BoxShadow(color: AppColors.primary.withValues(alpha: 0.3), blurRadius: 8)],
+
+                // ── Action button ─────────────────────────────
+                if (!widget.enablePhoto)
+                  // Original save button (no photo mode)
+                  GestureDetector(
+                    onTap: _isRead ? null : () { _debounce?.cancel(); _save(); },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _isRead
+                            ? const Color(0xFFDCFCE7)
+                            : AppColors.primary,
+                        boxShadow: _isRead
+                            ? []
+                            : [BoxShadow(color: AppColors.primary.withValues(alpha: 0.3), blurRadius: 8)],
+                      ),
+                      child: _saving
+                          ? const Padding(
+                              padding: EdgeInsets.all(10),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white))
+                          : Icon(
+                              _isRead ? Icons.done_all_rounded : Icons.check_rounded,
+                              color: _isRead ? const Color(0xFF22C55E) : Colors.white,
+                              size: 20,
+                            ),
                     ),
-                    child: _saving
-                        ? const Padding(
-                            padding: EdgeInsets.all(10),
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white))
-                        : Icon(
-                            _isRead ? Icons.done_all_rounded : Icons.check_rounded,
-                            color: _isRead ? const Color(0xFF22C55E) : Colors.white,
-                            size: 20,
-                          ),
+                  )
+                else if (!_hasImage)
+                  // Camera button (photo mode, no image yet)
+                  GestureDetector(
+                    onTap: _saving ? null : _capturePhoto,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFF06B6D4),
+                        boxShadow: [
+                          BoxShadow(
+                              color: const Color(0xFF06B6D4).withValues(alpha: 0.35),
+                              blurRadius: 8)
+                        ],
+                      ),
+                      child: _saving
+                          ? const Padding(
+                              padding: EdgeInsets.all(10),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.camera_alt_rounded,
+                              color: Colors.white, size: 20),
+                    ),
+                  )
+                else
+                  // Check / saved indicator (has image)
+                  GestureDetector(
+                    onTap: _saving ? null : () { _debounce?.cancel(); _save(); },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFFDCFCE7),
+                      ),
+                      child: _saving
+                          ? const Padding(
+                              padding: EdgeInsets.all(10),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Color(0xFF22C55E)))
+                          : const Icon(Icons.done_all_rounded,
+                              color: Color(0xFF22C55E), size: 20),
+                    ),
                   ),
-                ),
               ],
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Color _buildBorderColor() {
+    if (_inputError != null) return Colors.red;
+    if (_isRead) {
+      if (widget.enablePhoto && _hasImage) return const Color(0xFF06B6D4).withValues(alpha: 0.5);
+      return const Color(0xFF22C55E).withValues(alpha: 0.5);
+    }
+    return const Color(0xFFE2E8F0);
+  }
+}
+
+// ─── Camera Capture Page ───────────────────────────────────
+
+/// Full-screen camera page. Returns the captured image file path, or null.
+class _CameraCapturePage extends StatefulWidget {
+  final List<CameraDescription> cameras;
+  const _CameraCapturePage({required this.cameras});
+
+  @override
+  State<_CameraCapturePage> createState() => _CameraCaptureCageState();
+}
+
+class _CameraCaptureCageState extends State<_CameraCapturePage> {
+  late CameraController _controller;
+  bool _initialized = false;
+  bool _capturing = false;
+  
+  // Flash & Zoom states
+  FlashMode _flashMode = FlashMode.off;
+  double _currentZoomLevel = 1.0;
+  double _minAvailableZoom = 1.0;
+  double _maxAvailableZoom = 1.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    _controller = CameraController(
+      widget.cameras.first,
+      ResolutionPreset.high,
+      enableAudio: false,
+    );
+    await _controller.initialize();
+    
+    // Load persisted flash mode, default to off
+    final prefs = getIt<PreferencesService>();
+    final savedFlash = await prefs.getCameraFlashMode();
+    _flashMode = FlashMode.values.firstWhere(
+      (m) => m.name == savedFlash,
+      orElse: () => FlashMode.off,
+    );
+
+    // Default to auto flash and grab zoom bounds
+    await _controller.setFlashMode(_flashMode);
+    _minAvailableZoom = await _controller.getMinZoomLevel();
+    _maxAvailableZoom = await _controller.getMaxZoomLevel();
+    _currentZoomLevel = _minAvailableZoom;
+
+    if (mounted) setState(() => _initialized = true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _toggleFlash() async {
+    if (!_initialized) return;
+    FlashMode nextMode;
+    switch (_flashMode) {
+      case FlashMode.auto:
+        nextMode = FlashMode.always;
+        break;
+      case FlashMode.always:
+        nextMode = FlashMode.off;
+        break;
+      case FlashMode.off:
+        nextMode = FlashMode.auto;
+        break;
+      case FlashMode.torch:
+        nextMode = FlashMode.auto; // Unused but covered
+        break;
+    }
+    await _controller.setFlashMode(nextMode);
+    setState(() => _flashMode = nextMode);
+    await getIt<PreferencesService>().setCameraFlashMode(nextMode.name);
+  }
+
+  void _handleScaleUpdate(ScaleUpdateDetails details) async {
+    if (!_initialized) return;
+    
+    final zoomFactor = details.scale;
+    double newZoom = _currentZoomLevel * zoomFactor;
+
+    // Dampen the zoom speed to make it smoother
+    if (zoomFactor > 1) {
+      newZoom = _currentZoomLevel + 0.05;
+    } else if (zoomFactor < 1) {
+      newZoom = _currentZoomLevel - 0.05;
+    }
+
+    newZoom = newZoom.clamp(_minAvailableZoom, _maxAvailableZoom);
+    if (newZoom != _currentZoomLevel) {
+      try {
+        await _controller.setZoomLevel(newZoom);
+        _currentZoomLevel = newZoom;
+      } catch (e) {
+         // ignore
+      }
+    }
+  }
+
+  Future<void> _capture() async {
+    if (!_initialized || _capturing) return;
+    setState(() => _capturing = true);
+    try {
+      final file = await _controller.takePicture();
+      if (mounted) Navigator.pop(context, file.path);
+    } finally {
+      if (mounted) setState(() => _capturing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (_initialized)
+            GestureDetector(
+              onScaleUpdate: _handleScaleUpdate,
+              child: CameraPreview(_controller),
+            ),
+          if (!_initialized)
+            const Center(
+              child: CircularProgressIndicator(color: Colors.white),
+            ),
+          // Close button
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 12,
+            left: 16,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white, size: 28),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+          // Flash toggle
+          if (_initialized)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 12,
+              right: 16,
+              child: IconButton(
+                icon: Icon(
+                  _flashMode == FlashMode.always 
+                      ? Icons.flash_on_rounded
+                      : _flashMode == FlashMode.off
+                          ? Icons.flash_off_rounded
+                          : Icons.flash_auto_rounded,
+                  color: Colors.white,
+                  size: 28,
+                ),
+                onPressed: _toggleFlash,
+              ),
+            ),
+          // Capture button
+          Positioned(
+            bottom: 48,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: _capture,
+                child: Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 3),
+                    color: _capturing
+                        ? Colors.white.withValues(alpha: 0.5)
+                        : Colors.white.withValues(alpha: 0.2),
+                  ),
+                  child: _capturing
+                      ? const Padding(
+                          padding: EdgeInsets.all(20),
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2.5, color: Colors.white))
+                      : const Icon(Icons.camera_alt_rounded,
+                          color: Colors.white, size: 32),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

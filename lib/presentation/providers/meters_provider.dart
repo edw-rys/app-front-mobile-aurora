@@ -26,6 +26,13 @@ class MetersState {
   final int downloadedCount;
   final bool isUpdating;
   final String? updateStatus;
+  // ── Photo flags ──────────────────────────────────────────
+  final bool enablePhoto;
+  final bool requirePhoto;
+  // ── Image upload progress ────────────────────────────────
+  final bool isUploadingImages;
+  final int imageUploadProgress;
+  final int imageUploadTotal;
 
   const MetersState({
     this.isLoading = false,
@@ -42,6 +49,11 @@ class MetersState {
     this.downloadedCount = 0,
     this.isUpdating = false,
     this.updateStatus,
+    this.enablePhoto = false,
+    this.requirePhoto = false,
+    this.isUploadingImages = false,
+    this.imageUploadProgress = 0,
+    this.imageUploadTotal = 0,
   });
 
   MetersState copyWith({
@@ -59,6 +71,11 @@ class MetersState {
     int? downloadedCount,
     bool? isUpdating,
     String? updateStatus,
+    bool? enablePhoto,
+    bool? requirePhoto,
+    bool? isUploadingImages,
+    int? imageUploadProgress,
+    int? imageUploadTotal,
   }) {
     return MetersState(
       isLoading: isLoading ?? this.isLoading,
@@ -75,6 +92,11 @@ class MetersState {
       downloadedCount: downloadedCount ?? this.downloadedCount,
       isUpdating: isUpdating ?? this.isUpdating,
       updateStatus: updateStatus ?? this.updateStatus,
+      enablePhoto: enablePhoto ?? this.enablePhoto,
+      requirePhoto: requirePhoto ?? this.requirePhoto,
+      isUploadingImages: isUploadingImages ?? this.isUploadingImages,
+      imageUploadProgress: imageUploadProgress ?? this.imageUploadProgress,
+      imageUploadTotal: imageUploadTotal ?? this.imageUploadTotal,
     );
   }
 
@@ -133,6 +155,8 @@ class MetersNotifier extends StateNotifier<MetersState> {
       final stats = await _meterRepo.getReadingStats();
       final sectors = await _meterRepo.getLocalSectors();
       final isWorkStarted = await _prefsService.isWorkStarted();
+      final enablePhoto = await _prefsService.getEnablePhoto();
+      final requirePhoto = await _prefsService.getRequirePhoto();
 
       state = state.copyWith(
         isLoading: false,
@@ -141,6 +165,8 @@ class MetersNotifier extends StateNotifier<MetersState> {
         readings: readingMap,
         stats: stats,
         isWorkStarted: isWorkStarted,
+        enablePhoto: enablePhoto,
+        requirePhoto: requirePhoto,
       );
     } catch (e) {
       state = state.copyWith(
@@ -314,26 +340,34 @@ class MetersNotifier extends StateNotifier<MetersState> {
     state = state.copyWith(readings: updatedReadings);
   }
 
-  /// Validate readings to distinguish valid from invalid ones
-  ReadingValidationResult validateReadings() {
+  /// Validate readings to distinguish valid from invalid ones.
+  /// When [requirePhoto] is true, readings without a local image are invalid.
+  ReadingValidationResult validateReadings({bool requirePhoto = false}) {
     final valid = <ReadingModel>[];
     final invalid = <ReadingModel>[];
 
     for (final reading in state.readings.values) {
-      if (reading.isValid) {
-        valid.add(reading);
-      } else {
+      if (!reading.isValid) {
         invalid.add(reading);
+        continue;
       }
+      // If photo required and no image captured, reject
+      if (requirePhoto && !reading.hasLocalImage) {
+        invalid.add(reading);
+        continue;
+      }
+      valid.add(reading);
     }
 
     return ReadingValidationResult(valid: valid, invalid: invalid);
   }
 
-  /// Finish work: send readings to API in batches of 500 and mark synced
+  /// Finish work: send readings then images, in batches.
+  /// Order: 1) Send readings in batches of 500, 2) Upload images in batches of 4.
   Future<SyncResult> finishWork({
     required List<ReadingModel> readingsToSend,
     void Function(int current, int total)? onProgress,
+    void Function(int current, int total)? onImageProgress,
   }) async {
     final parentId = await _prefsService.getParentId();
     if (parentId == null) return const SyncResult(synced: 0, errors: 0, errorMessages: []);
@@ -348,6 +382,7 @@ class MetersNotifier extends StateNotifier<MetersState> {
     String? finalGlobalError;
     List<String> finalGlobalErrorDetails = [];
 
+    // ── Step 1: Send readings ──────────────────────────────
     int sent = 0;
     for (int start = 0; start < total; start += batchSize) {
       final end = (start + batchSize).clamp(0, total);
@@ -367,23 +402,44 @@ class MetersNotifier extends StateNotifier<MetersState> {
         finalGlobalErrorDetails.addAll(result.globalErrorDetails);
       }
 
-      // Only mark successful as synced in our local state map (DB handles it, but we update state without full reload yet to avoid lag)
-      for (final r in batch) {
-        if (!result.errorMessages.any((msg) => msg.startsWith('${r.nAbonado}:'))) {
-          // This will be overwritten by loadMeters anyway, but just in case
-        }
-      }
-
       sent += batch.length;
       onProgress?.call(sent, total);
     }
 
-    // Si todo salió bien, cerramos el periodo de trabajo
+    // ── Step 2: Upload images ──────────────────────────────
+    final readingsWithImages = await _meterRepo.getReadingsWithPendingImages();
+    if (readingsWithImages.isNotEmpty) {
+      state = state.copyWith(
+        isUploadingImages: true,
+        imageUploadProgress: 0,
+        imageUploadTotal: readingsWithImages.length,
+      );
+
+      await _meterRepo.submitImagesToApi(
+        readingsWithImages: readingsWithImages,
+        parentId: parentId,
+        onProgress: (imgSent, imgTotal) {
+          state = state.copyWith(
+            imageUploadProgress: imgSent,
+            imageUploadTotal: imgTotal,
+          );
+          onImageProgress?.call(imgSent, imgTotal);
+        },
+      );
+
+      state = state.copyWith(
+        isUploadingImages: false,
+        imageUploadProgress: 0,
+        imageUploadTotal: 0,
+      );
+    }
+
+    // ── Close work period if no errors ────────────────────
     if (totalErrors == 0 && finalGlobalError == null) {
       await _prefsService.setWorkStarted(false);
     }
 
-    // Reload to reflect updated sync state (either synced or errored)
+    // Reload to reflect updated sync state
     await loadMeters();
 
     return SyncResult(
@@ -498,7 +554,11 @@ final filteredMetersProvider = Provider<List<MeterModel>>((ref) {
     case 'errors':
       list = list.where((m) {
         final r = ms.readings[m.nAbonado];
-        return r != null && (!r.isValid || r.syncError != null);
+        if (r == null) return false;
+        if (!r.isValid || r.syncError != null) return true;
+        // requirePhoto error: reading has value but no image
+        if (ms.requirePhoto && r.isValid && !r.hasLocalImage) return true;
+        return false;
       }).toList();
       break;
   }

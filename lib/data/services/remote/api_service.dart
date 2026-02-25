@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import '../../../core/config/app_config.dart';
 import '../../../core/constants/endpoints.dart';
 import '../../models/meter_model.dart';
@@ -18,7 +21,7 @@ class ApiService {
     _dio = Dio(BaseOptions(
       baseUrl: AppConfig.apiBaseUrl,
       connectTimeout: const Duration(seconds: 30),
-      receiveTimeout: const Duration(seconds: 30),
+      receiveTimeout: const Duration(seconds: 60),
       headers: {
         'Accept': 'application/json',
         'Content-Type': 'application/json',
@@ -132,6 +135,78 @@ class ApiService {
     return response.data as Map<String, dynamic>;
   }
 
+  // ─── Images ───────────────────────────────────────────────
+
+  /// Upload images for up to 4 readings at once (multipart/form-data).
+  /// [images] is a list of (nAbonado, imagePath) tuples — max 4 per call.
+  ///
+  /// Expected response payload:
+  /// [{"n_abonado": "...", "image_id": 1, "path": "readings/images/..."}]
+  Future<List<Map<String, dynamic>>> postReadingsImages({
+    required int readingPeriodId,
+    required List<({String nAbonado, String imagePath})> images,
+  }) async {
+    final formData = FormData();
+    formData.fields.add(
+      MapEntry('reading_period_id', readingPeriodId.toString()),
+    );
+
+    for (int i = 0; i < images.length; i++) {
+      final img = images[i];
+      formData.fields.add(MapEntry('readings[$i][n_abonado]', img.nAbonado));
+      formData.files.add(MapEntry(
+        'readings[$i][image]',
+        await MultipartFile.fromFile(
+          img.imagePath,
+          filename: img.imagePath.split(Platform.pathSeparator).last,
+        ),
+      ));
+    }
+
+    final response = await _dio.post(
+      Endpoints.readingsImage,
+      data: formData,
+      options: Options(
+        headers: {'Content-Type': 'multipart/form-data'},
+        receiveTimeout: const Duration(seconds: 120),
+        sendTimeout: const Duration(seconds: 120),
+        responseType: ResponseType.bytes,
+        // Accept all status codes so we can log the raw body on errors
+        validateStatus: (status) => true,
+      ),
+    );
+
+    // Always log the raw response for debugging
+    String rawBody = '';
+    try {
+      rawBody = String.fromCharCodes(response.data as List<int>);
+      debugPrint('[postReadingsImages] HTTP ${response.statusCode}: $rawBody');
+    } catch (e) {
+      debugPrint('[postReadingsImages] Could not decode response bytes: $e');
+    }
+
+    // Manually throw if the status is an error so retries work
+    if ((response.statusCode ?? 500) >= 400) {
+      throw DioException(
+        requestOptions: response.requestOptions,
+        response: response,
+        message: 'HTTP ${response.statusCode}: $rawBody',
+      );
+    }
+
+    // Safely decode the response body as JSON
+    try {
+      final decoded = jsonDecode(rawBody) as Map<String, dynamic>;
+      final payload = decoded['payload'];
+      if (payload is List) {
+        return payload.map((e) => e as Map<String, dynamic>).toList();
+      }
+    } catch (e) {
+      debugPrint('[postReadingsImages] failed to parse JSON: $e\nBody was: $rawBody');
+    }
+    return [];
+  }
+
   /// Finish reading period
   Future<Map<String, dynamic>> finishPeriod(int readingPeriodId) async {
     final response = await _dio.post(
@@ -187,4 +262,6 @@ class MetersResponse {
   String? get endDate => aditionalParams?['end_date'] as String?;
   String? get period => aditionalParams?['period'] as String?;
   String? get status => aditionalParams?['status'] as String?;
+  bool get enablePhoto => aditionalParams?['enable_photo'] as bool? ?? false;
+  bool get requirePhoto => aditionalParams?['require_photo'] as bool? ?? false;
 }

@@ -11,6 +11,10 @@ class ReadingModel {
   final String? dateRead;
   final double? lat;
   final double? lon;
+  /// Local file path for the compressed image (before upload)
+  final String? localImagePath;
+  /// Whether the image has already been uploaded to the server
+  final bool imageSynced;
 
   const ReadingModel({
     required this.nAbonado,
@@ -25,6 +29,8 @@ class ReadingModel {
     this.dateRead,
     this.lat,
     this.lon,
+    this.localImagePath,
+    this.imageSynced = false,
   });
 
 
@@ -44,6 +50,8 @@ class ReadingModel {
       dateRead: json['date_read'] as String?,
       lat: (json['lat'] as num?)?.toDouble(),
       lon: (json['lon'] as num?)?.toDouble(),
+      localImagePath: json['local_image_path'] as String?,
+      imageSynced: (json['image_synced'] as int? ?? 0) == 1,
     );
   }
 
@@ -61,6 +69,8 @@ class ReadingModel {
       'date_read': dateRead,
       'lat': lat,
       'lon': lon,
+      'local_image_path': localImagePath,
+      'image_synced': imageSynced ? 1 : 0,
     };
   }
 
@@ -80,7 +90,7 @@ class ReadingModel {
     }
   }
 
-  /// Convert to API bulk format
+  /// Convert to API bulk format (images are sent separately)
   Map<String, dynamic> toApiBulkItem() {
     return {
       'n_abonado': nAbonado,
@@ -108,6 +118,9 @@ class ReadingModel {
     String? dateRead,
     double? lat,
     double? lon,
+    String? localImagePath,
+    bool clearLocalImagePath = false,
+    bool? imageSynced,
   }) {
     return ReadingModel(
       nAbonado: nAbonado ?? this.nAbonado,
@@ -117,14 +130,19 @@ class ReadingModel {
       isDamaged: isDamaged ?? this.isDamaged,
       isInaccessible: isInaccessible ?? this.isInaccessible,
       synced: synced ?? this.synced,
-      syncError: syncError, // Can be set back to null by explicitly omitting/clearing it depending on logic, but usually we just want to replace
+      syncError: syncError,
       localTimestamp: localTimestamp ?? this.localTimestamp,
       dateRead: dateRead ?? this.dateRead,
       lat: lat ?? this.lat,
       lon: lon ?? this.lon,
+      localImagePath: clearLocalImagePath ? null : (localImagePath ?? this.localImagePath),
+      imageSynced: imageSynced ?? this.imageSynced,
     );
   }
 
   /// Whether the reading is considered valid (has a value or is marked inaccessible/damaged)
   bool get isValid => currentReading != null || isInaccessible || isDamaged;
+
+  /// Whether the reading has a locally stored image
+  bool get hasLocalImage => localImagePath != null && localImagePath!.isNotEmpty;
 }

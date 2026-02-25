@@ -8,7 +8,7 @@ import '../../models/reading_model.dart';
 class DatabaseService {
   static Database? _database;
   static const String _dbName = 'aurora_blue_e_dinky.db';
-  static const int _dbVersion = 5;
+  static const int _dbVersion = 6;
 
   Future<Database> get database async {
     _database ??= await _initDB();
@@ -68,7 +68,9 @@ class DatabaseService {
         local_timestamp TEXT,
         date_read TEXT,
         lat REAL,
-        lon REAL
+        lon REAL,
+        local_image_path TEXT,
+        image_synced INTEGER DEFAULT 0
       )
     ''');
 
@@ -121,6 +123,18 @@ class DatabaseService {
           PRIMARY KEY (name, period_id)
         )
       ''');
+    }
+    if (oldVersion < 6) {
+      try {
+        await db.execute(
+          'ALTER TABLE readings ADD COLUMN local_image_path TEXT',
+        );
+      } catch (_) {}
+      try {
+        await db.execute(
+          'ALTER TABLE readings ADD COLUMN image_synced INTEGER DEFAULT 0',
+        );
+      } catch (_) {}
     }
   }
 
@@ -317,29 +331,100 @@ class DatabaseService {
 
   // ─── Readings ─────────────────────────────────────────────
 
-  /// Save or update a reading (local first)
+  /// Save or update a reading (local first).
+  /// On update, image_synced and local_image_path are NOT overwritten
+  /// to prevent re-uploading images that were already synced.
   Future<void> upsertReading(ReadingModel reading, String periodId) async {
     final db = await database;
-    await db.insert(
+
+    final existing = await db.query(
       'readings',
-      {
-        'n_abonado': reading.nAbonado,
-        'period_id': periodId,
-        'current_reading': reading.currentReading,
-        'notes': reading.notes,
-        'incidents': reading.incidents != null
-            ? jsonEncode(reading.incidents)
-            : null,
-        'is_damaged': reading.isDamaged ? 1 : 0,
-        'is_inaccessible': reading.isInaccessible ? 1 : 0,
-        'synced': reading.synced ? 1 : 0,
-        'sync_error': reading.syncError,
-        'local_timestamp': reading.localTimestamp,
-        'date_read': reading.dateRead,
-        'lat': reading.lat,
-        'lon': reading.lon,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      columns: ['n_abonado', 'image_synced', 'local_image_path'],
+      where: 'n_abonado = ?',
+      whereArgs: [reading.nAbonado],
+      limit: 1,
+    );
+
+    if (existing.isEmpty) {
+      // First time: full insert including image fields
+      await db.insert(
+        'readings',
+        {
+          'n_abonado': reading.nAbonado,
+          'period_id': periodId,
+          'current_reading': reading.currentReading,
+          'notes': reading.notes,
+          'incidents': reading.incidents != null
+              ? jsonEncode(reading.incidents)
+              : null,
+          'is_damaged': reading.isDamaged ? 1 : 0,
+          'is_inaccessible': reading.isInaccessible ? 1 : 0,
+          'synced': reading.synced ? 1 : 0,
+          'sync_error': reading.syncError,
+          'local_timestamp': reading.localTimestamp,
+          'date_read': reading.dateRead,
+          'lat': reading.lat,
+          'lon': reading.lon,
+          'local_image_path': reading.localImagePath,
+          'image_synced': reading.imageSynced ? 1 : 0,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    } else {
+      // Update: preserve image_synced and local_image_path from DB
+      // Only overwrite local_image_path if the incoming value is not null
+      // (user took a new photo), and reset image_synced only in that case.
+      final existingImageSynced = (existing.first['image_synced'] as int?) ?? 0;
+      final existingImagePath = existing.first['local_image_path'] as String?;
+
+      final bool newPhoto = reading.localImagePath != null &&
+          reading.localImagePath != existingImagePath;
+
+      await db.update(
+        'readings',
+        {
+          'period_id': periodId,
+          'current_reading': reading.currentReading,
+          'notes': reading.notes,
+          'incidents': reading.incidents != null
+              ? jsonEncode(reading.incidents)
+              : null,
+          'is_damaged': reading.isDamaged ? 1 : 0,
+          'is_inaccessible': reading.isInaccessible ? 1 : 0,
+          'synced': reading.synced ? 1 : 0,
+          'sync_error': reading.syncError,
+          'local_timestamp': reading.localTimestamp,
+          'date_read': reading.dateRead,
+          'lat': reading.lat,
+          'lon': reading.lon,
+          // Only update image fields if a brand-new photo has been captured
+          'local_image_path': newPhoto ? reading.localImagePath : existingImagePath,
+          'image_synced': newPhoto ? 0 : existingImageSynced,
+        },
+        where: 'n_abonado = ?',
+        whereArgs: [reading.nAbonado],
+      );
+    }
+  }
+
+  /// Get readings that have a local image not yet uploaded
+  Future<List<ReadingModel>> getReadingsWithPendingImages() async {
+    final db = await database;
+    final results = await db.query(
+      'readings',
+      where: 'local_image_path IS NOT NULL AND image_synced = 0',
+    );
+    return results.map(_readingFromRow).toList();
+  }
+
+  /// Mark image as uploaded for a given n_abonado
+  Future<void> markImageAsSynced(String nAbonado) async {
+    final db = await database;
+    await db.update(
+      'readings',
+      {'image_synced': 1},
+      where: 'n_abonado = ?',
+      whereArgs: [nAbonado],
     );
   }
 
@@ -525,6 +610,51 @@ class DatabaseService {
     await db.delete('meters', where: 'period_id = ?', whereArgs: [periodId]);
   }
 
+  /// Delete readings whose n_abonado is not in [validAbonados].
+  /// Returns the local_image_path of every deleted reading so the caller
+  /// can delete the files from disk.
+  Future<List<String>> deleteOrphanReadings(
+    String periodId,
+    Set<String> validAbonados,
+  ) async {
+    final db = await database;
+
+    // Find orphan readings with a local image
+    final orphans = await db.query(
+      'readings',
+      columns: ['n_abonado', 'local_image_path'],
+      where: 'period_id = ? AND n_abonado NOT IN (${validAbonados.map((_) => '?').join(',')})',
+      whereArgs: [periodId, ...validAbonados],
+    );
+
+    final imagePaths = orphans
+        .where((r) => r['local_image_path'] != null)
+        .map((r) => r['local_image_path'] as String)
+        .toList();
+
+    // Delete the orphan readings
+    if (validAbonados.isNotEmpty) {
+      await db.delete(
+        'readings',
+        where: 'period_id = ? AND n_abonado NOT IN (${validAbonados.map((_) => '?').join(',')})',
+        whereArgs: [periodId, ...validAbonados],
+      );
+    }
+
+    return imagePaths;
+  }
+
+  /// Get all local_image_path values that are not null
+  Future<List<String>> getAllLocalImagePaths() async {
+    final db = await database;
+    final rows = await db.query(
+      'readings',
+      columns: ['local_image_path'],
+      where: 'local_image_path IS NOT NULL',
+    );
+    return rows.map((r) => r['local_image_path'] as String).toList();
+  }
+
   /// Close database
   Future<void> close() async {
     final db = await database;
@@ -554,6 +684,8 @@ class DatabaseService {
       dateRead: row['date_read'] as String?,
       lat: (row['lat'] as num?)?.toDouble(),
       lon: (row['lon'] as num?)?.toDouble(),
+      localImagePath: row['local_image_path'] as String?,
+      imageSynced: (row['image_synced'] as int? ?? 0) == 1,
     );
   }
 }

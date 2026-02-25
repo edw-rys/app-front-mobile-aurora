@@ -11,7 +11,10 @@ import '../providers/meters_provider.dart';
 import '../providers/connectivity_provider.dart';
 import '../../data/models/meter_model.dart';
 import '../../data/repositories/meter_repository.dart';
+import '../../data/services/local/preferences_service.dart';
+import '../../app/di/injection.dart';
 import '../widgets/gps_onboarding_sheet.dart';
+import '../widgets/camera_onboarding_sheet.dart';
 
 /// Home screen — 3 states:
 ///   A — no meters downloaded
@@ -35,9 +38,34 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Future<void> _checkPermissions() async {
-    final status = await Permission.locationWhenInUse.status;
-    if (!status.isGranted && mounted) {
-      await GpsOnboardingSheet.show(context);
+    final prefs = getIt<PreferencesService>();
+    final shownGps = await prefs.isGpsOnboardingShown();
+    
+    // 1. GPS Onboarding
+    if (!shownGps) {
+      final status = await Permission.locationWhenInUse.status;
+      if (!status.isGranted) {
+        if (mounted) {
+          await GpsOnboardingSheet.show(context);
+          await prefs.setGpsOnboardingShown(true);
+        }
+      } else {
+        await prefs.setGpsOnboardingShown(true);
+      }
+    }
+
+    // 2. Camera Onboarding
+    final shownCamera = await prefs.isCameraOnboardingShown();
+    if (!shownCamera) {
+      final camStatus = await Permission.camera.status;
+      if (!camStatus.isGranted) {
+        if (mounted) {
+          await CameraOnboardingSheet.show(context);
+          await prefs.setCameraOnboardingShown(true);
+        }
+      } else {
+        await prefs.setCameraOnboardingShown(true);
+      }
     }
   }
 
@@ -206,7 +234,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       final syncResult = await ref.read(metersProvider.notifier).finishWork(
         readingsToSend: readings.cast(),
         onProgress: (cur, tot) => controller.add(LoadingOverlayState(
-          current: cur, total: tot, message: 'Enviando $cur de $tot...')),
+          current: cur, total: tot, message: 'Enviando $cur de $tot lecturas...')),
+        onImageProgress: (cur, tot) => controller.add(LoadingOverlayState(
+          current: cur, total: tot, message: 'Subiendo $cur de $tot imágenes...')),
       );
 
       if (syncResult.hasErrors) {

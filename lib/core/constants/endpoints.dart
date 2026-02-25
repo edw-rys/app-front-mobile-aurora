@@ -15,5 +15,6 @@ class Endpoints {
   // Meters
   static const String metersAvailable = '/meters/available';
   static const String readingsBulk = '/meters/readings/bulk';
+  static const String readingsImage = '/meters/readings/image';
   static const String finishPeriod = '/meters/readings/finish-period';
 }

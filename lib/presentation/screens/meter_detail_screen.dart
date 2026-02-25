@@ -1,16 +1,24 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:photo_view/photo_view.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_strings.dart';
 import '../../core/utils/helpers.dart';
 import '../../core/utils/validators.dart';
 import '../../data/models/reading_model.dart';
+import '../../data/services/local/image_compression_service.dart';
 import '../providers/meters_provider.dart';
+import '../widgets/camera_onboarding_sheet.dart';
+import '../../app/di/injection.dart';
+import '../../data/services/local/preferences_service.dart';
 
 /// Meter detail screen — mockup 7
-/// Giant centered input, collapsible optional section, sticky footer
+/// Giant centered input, collapsible sections, sticky footer with camera support
 class MeterDetailScreen extends ConsumerStatefulWidget {
   final String nAbonado;
 
@@ -27,12 +35,15 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
   bool _isInaccessible = false;
   bool _isSaving = false;
   bool _optionalExpanded = false;
+  bool _photoExpanded = false;
   bool _showSavedIndicator = false;
   Timer? _indicatorTimer;
 
-  // Reactive validation
-  String? _inputError; // non-null = blocked
-  int? _prevReading;   // filled when meter is loaded
+  String? _inputError;
+  int? _prevReading;
+
+  final _imageService = ImageCompressionService();
+  String? _localImagePath; // Path captured this session (may already be in reading)
 
   @override
   void initState() {
@@ -44,7 +55,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
   void didUpdateWidget(covariant MeterDetailScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.nAbonado != widget.nAbonado) {
-      // Route param changed, but widget tree was reused
       _readingController.clear();
       _notesController.clear();
       setState(() {
@@ -52,6 +62,8 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
         _isInaccessible = false;
         _inputError = null;
         _prevReading = null;
+        _localImagePath = null;
+        _photoExpanded = false;
       });
       _loadExistingReading();
     }
@@ -70,6 +82,8 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
       setState(() {
         _isDamaged = existing.isDamaged;
         _isInaccessible = existing.isInaccessible;
+        _localImagePath = existing.localImagePath;
+        _photoExpanded = existing.hasLocalImage;
       });
     }
   }
@@ -87,19 +101,17 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     final meter = s.meters.firstWhere((m) => m.nAbonado == widget.nAbonado);
     final prev = meter.reading.previousReading ?? 0;
     _readingController.text = prev.toString();
-    _readingController.selection = TextSelection.collapsed(offset: _readingController.text.length);
+    _readingController.selection =
+        TextSelection.collapsed(offset: _readingController.text.length);
     _validateInput(_readingController.text);
   }
 
-  /// Real-time input validation — sets _inputError and triggers rebuild
   void _validateInput(String raw) {
     final text = raw.trim();
-    // Allow empty (user is typing, not an error yet)
     if (text.isEmpty) {
       setState(() => _inputError = null);
       return;
     }
-    // Must be pure digits (no letters, no minus sign through UI path)
     if (!RegExp(r'^\d+$').hasMatch(text)) {
       setState(() => _inputError = 'Solo se admiten números');
       return;
@@ -121,7 +133,15 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     setState(() => _inputError = null);
   }
 
-  bool get _canSave => _inputError == null && !_isSaving;
+  bool get _hasImage => (_localImagePath != null && _localImagePath!.isNotEmpty);
+
+  bool get _canSave {
+    final s = ref.read(metersProvider);
+    if (_inputError != null || _isSaving) return false;
+    // requirePhoto: must have image to save
+    if (s.enablePhoto && s.requirePhoto && !_hasImage) return false;
+    return true;
+  }
 
   void _showSavedBriefly() {
     _indicatorTimer?.cancel();
@@ -131,7 +151,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     });
   }
 
-
   Future<void> _saveReading() async {
     final readingValue = int.tryParse(_readingController.text.trim());
     if (readingValue == null && !_isDamaged && !_isInaccessible) return;
@@ -139,7 +158,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     final s = ref.read(metersProvider);
     final meter = s.meters.firstWhere((m) => m.nAbonado == widget.nAbonado);
 
-    // Only warn for high consumption (negative+below-prev are already blocked by validation)
     if (readingValue != null) {
       final result = Validators.validateConsumption(readingValue, meter.reading.previousReading);
       if (result == ConsumptionResult.high) {
@@ -158,9 +176,9 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
       isInaccessible: _isInaccessible,
       localTimestamp: Helpers.formatDateTimeForApi(DateTime.now()),
       dateRead: Helpers.formatDateTimeForApi(DateTime.now()),
+      localImagePath: _localImagePath,
     );
 
-    // Capture next meter BEFORE saving, because saving might remove current meter from filtered list (e.g. if filtering by Pending)
     final filtered = ref.read(filteredMetersProvider);
     final currentIdx = filtered.indexWhere((m) => m.nAbonado == widget.nAbonado);
     String? nextAbonado;
@@ -184,10 +202,8 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
       context.go('/meters/${Uri.encodeComponent(explicitNext)}');
       return;
     }
-
     final filtered = ref.read(filteredMetersProvider);
     final idx = filtered.indexWhere((m) => m.nAbonado == widget.nAbonado);
-
     if (idx != -1 && idx < filtered.length - 1) {
       context.go('/meters/${Uri.encodeComponent(filtered[idx + 1].nAbonado)}');
     } else {
@@ -219,21 +235,77 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
         false;
   }
 
+  /// Opens the camera, captures and compresses a photo
+  Future<void> _capturePhoto() async {
+    final status = await Permission.camera.status;
+    if (!status.isGranted) {
+      if (mounted) {
+        await CameraOnboardingSheet.show(context);
+      }
+      final newStatus = await Permission.camera.status;
+      if (!newStatus.isGranted) return;
+    }
+
+    final cameras = await availableCameras();
+    if (cameras.isEmpty || !mounted) return;
+
+    final result = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _CameraCapturePage(cameras: cameras),
+        fullscreenDialog: true,
+      ),
+    );
+
+    if (result == null || !mounted) return;
+
+    setState(() => _isSaving = true);
+    try {
+      final compressed = await _imageService.compressAndSave(result);
+      setState(() {
+        _localImagePath = compressed;
+        _photoExpanded = true;
+        _isSaving = false;
+      });
+    } catch (e) {
+      setState(() => _isSaving = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al procesar imagen: $e')),
+        );
+      }
+    }
+  }
+
+  /// Opens the photo in full-screen with zoom and swipe-to-close
+  void _openPhotoView() {
+    if (!_hasImage) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PhotoViewPage(imagePath: _localImagePath!),
+        fullscreenDialog: true,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(metersProvider);
     final filtered = ref.watch(filteredMetersProvider);
-    
+
     final meter = s.meters.firstWhere(
       (m) => m.nAbonado == widget.nAbonado,
       orElse: () => throw StateError('Meter not found'),
     );
-    
+
     final idxInFiltered = filtered.indexOf(meter);
     final displayIdx = idxInFiltered != -1 ? idxInFiltered + 1 : 0;
     final displayTotal = filtered.length;
-    
     final prevReading = meter.reading.previousReading;
+
+    final enablePhoto = s.enablePhoto;
+    final requirePhoto = s.requirePhoto;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -279,7 +351,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                   padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
                   child: Column(
                     children: [
-                      // Client + address
                       Text(
                         meter.clientName,
                         style: const TextStyle(
@@ -287,7 +358,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 2),
-                      // n_abonado prominently
                       Text(
                         meter.nAbonado,
                         style: TextStyle(
@@ -305,7 +375,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                       ),
                       const SizedBox(height: 28),
 
-                      // Label row: "Nueva lectura" left + "Misma lectura" TextButton right
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
@@ -332,7 +401,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                       ),
                       const SizedBox(height: 4),
 
-                      // Giant reading input
                       TextField(
                         controller: _readingController,
                         keyboardType: TextInputType.number,
@@ -343,9 +411,7 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                           fontSize: 56,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 4,
-                          color: _inputError != null
-                              ? Colors.red
-                              : const Color(0xFF1A202C),
+                          color: _inputError != null ? Colors.red : const Color(0xFF1A202C),
                         ),
                         decoration: InputDecoration(
                           hintText: '00000',
@@ -376,7 +442,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                       ),
                       const SizedBox(height: 8),
 
-                      // Previous reading info
                       Text(
                         'Lectura anterior: ${prevReading ?? 'N/A'}',
                         style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Color(0xFF718096)),
@@ -387,6 +452,90 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                         style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
                       ),
                       const SizedBox(height: 32),
+
+                      // ── Collapsible photo section (when has image) ──
+                      if (enablePhoto && _hasImage) ...[
+                        GestureDetector(
+                          onTap: () => setState(() => _photoExpanded = !_photoExpanded),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF06B6D4).withValues(alpha: 0.08),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                  color: const Color(0xFF06B6D4).withValues(alpha: 0.25)),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.camera_alt_rounded,
+                                    size: 18, color: Color(0xFF06B6D4)),
+                                const SizedBox(width: 10),
+                                const Expanded(
+                                    child: Text('Foto del medidor',
+                                        style: TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                            color: Color(0xFF06B6D4)))),
+                                Icon(
+                                  Icons.check_circle_rounded,
+                                  size: 16,
+                                  color: AppColors.success,
+                                ),
+                                const SizedBox(width: 8),
+                                AnimatedRotation(
+                                  turns: _photoExpanded ? 0.5 : 0,
+                                  duration: const Duration(milliseconds: 250),
+                                  child: const Icon(Icons.expand_more_rounded,
+                                      size: 20, color: Color(0xFF06B6D4)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut,
+                          child: _photoExpanded
+                              ? GestureDetector(
+                                  onTap: _openPhotoView,
+                                  child: Container(
+                                    margin: const EdgeInsets.only(top: 8),
+                                    height: 200,
+                                    width: double.infinity,
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                          color: const Color(0xFF06B6D4).withValues(alpha: 0.3)),
+                                    ),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        Image.file(
+                                          File(_localImagePath!),
+                                          fit: BoxFit.cover,
+                                        ),
+                                        Positioned(
+                                          bottom: 8,
+                                          right: 8,
+                                          child: Container(
+                                            padding: const EdgeInsets.all(6),
+                                            decoration: BoxDecoration(
+                                              color: Colors.black.withValues(alpha: 0.5),
+                                              borderRadius: BorderRadius.circular(8),
+                                            ),
+                                            child: const Icon(Icons.zoom_in_rounded,
+                                                color: Colors.white, size: 18),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                        const SizedBox(height: 20),
+                      ],
 
                       // ── Collapsible "Opcional" ────────────────
                       GestureDetector(
@@ -406,7 +555,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                           ],
                         ),
                       ),
-
                       AnimatedSize(
                         duration: const Duration(milliseconds: 300),
                         curve: Curves.easeInOut,
@@ -468,6 +616,61 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      // Camera button (only when enablePhoto=true)
+                      if (enablePhoto) ...[
+                        SizedBox(
+                          width: double.infinity,
+                          height: 48,
+                          child: OutlinedButton.icon(
+                            onPressed: _isSaving ? null : _capturePhoto,
+                            icon: _isSaving && !_hasImage
+                                ? const SizedBox(
+                                    width: 18, height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2))
+                                : Icon(
+                                    _hasImage ? Icons.camera_alt_rounded : Icons.camera_alt_rounded,
+                                    size: 20,
+                                    color: _hasImage ? AppColors.success : const Color(0xFF06B6D4),
+                                  ),
+                            label: Text(
+                              _hasImage ? 'Cambiar foto' : 'Tomar foto del medidor',
+                              style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: _hasImage ? AppColors.success : const Color(0xFF06B6D4)),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              side: BorderSide(
+                                  color: _hasImage
+                                      ? AppColors.success.withValues(alpha: 0.5)
+                                      : const Color(0xFF06B6D4).withValues(alpha: 0.5)),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                            ),
+                          ),
+                        ),
+                        // require_photo hint
+                        if (requirePhoto && !_hasImage)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.info_outline_rounded,
+                                    size: 13, color: Colors.orange.shade700),
+                                const SizedBox(width: 4),
+                                Text('Se requiere foto para guardar',
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.orange.shade700,
+                                        fontWeight: FontWeight.w500)),
+                              ],
+                            ),
+                          ),
+                        const SizedBox(height: 8),
+                      ],
+
+                      // Save button
                       SizedBox(
                         width: double.infinity,
                         height: 52,
@@ -476,7 +679,9 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppColors.primary,
                             foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            disabledBackgroundColor: const Color(0xFFCBD5E1),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12)),
                             elevation: 0,
                           ),
                           child: _isSaving
@@ -486,10 +691,12 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                                   child: CircularProgressIndicator(
                                       strokeWidth: 2.5, color: Colors.white))
                               : const Text('Guardar y siguiente',
-                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                                  style: TextStyle(
+                                      fontSize: 16, fontWeight: FontWeight.w700)),
                         ),
                       ),
-                      // Footer row: [← Anterior] [Volver a la lista] [Omitir →]
+
+                      // Footer nav row
                       Row(
                         children: [
                           TextButton.icon(
@@ -502,7 +709,7 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                             ),
                           ),
                           const Spacer(),
-                          TextButton(
+                          /*TextButton(
                             onPressed: () {
                               if (Navigator.canPop(context)) {
                                 Navigator.pop(context);
@@ -511,9 +718,10 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                               }
                             },
                             child: Text('Volver',
-                                style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.w500)),
+                                style: TextStyle(
+                                    color: AppColors.primary, fontWeight: FontWeight.w500)),
                           ),
-                          const Spacer(),
+                          const Spacer(),*/
                           TextButton.icon(
                             onPressed: _navigateToNext,
                             icon: const Icon(Icons.arrow_forward_rounded, size: 18),
@@ -532,7 +740,7 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
             ],
           ),
 
-          // ── Floating saved indicator (bottom-left) ───────────
+          // ── Floating saved indicator ─────────────────────────
           if (_showSavedIndicator)
             Positioned(
               left: 20,
@@ -567,6 +775,238 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
   }
 }
 
+// ─── Camera Capture Page ──────────────────────────────────────
+
+class _CameraCapturePage extends StatefulWidget {
+  final List<CameraDescription> cameras;
+  const _CameraCapturePage({required this.cameras});
+
+  @override
+  State<_CameraCapturePage> createState() => _CameraCapturageState();
+}
+
+class _CameraCapturageState extends State<_CameraCapturePage> {
+  late CameraController _controller;
+  bool _initialized = false;
+  bool _capturing = false;
+
+  // Flash & Zoom states
+  FlashMode _flashMode = FlashMode.off;
+  double _currentZoomLevel = 1.0;
+  double _minAvailableZoom = 1.0;
+  double _maxAvailableZoom = 1.0;
+
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    _controller = CameraController(
+      widget.cameras.first,
+      ResolutionPreset.high,
+      enableAudio: false,
+    );
+    await _controller.initialize();
+
+    // Load persisted flash mode, default to off
+    final prefs = getIt<PreferencesService>();
+    final savedFlash = await prefs.getCameraFlashMode();
+    _flashMode = FlashMode.values.firstWhere(
+      (m) => m.name == savedFlash,
+      orElse: () => FlashMode.off,
+    );
+
+    // Default to auto flash and grab zoom bounds
+    await _controller.setFlashMode(_flashMode);
+    _minAvailableZoom = await _controller.getMinZoomLevel();
+    _maxAvailableZoom = await _controller.getMaxZoomLevel();
+    _currentZoomLevel = _minAvailableZoom;
+
+    if (mounted) setState(() => _initialized = true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _toggleFlash() async {
+    if (!_initialized) return;
+    FlashMode nextMode;
+    switch (_flashMode) {
+      case FlashMode.auto:
+        nextMode = FlashMode.always;
+        break;
+      case FlashMode.always:
+        nextMode = FlashMode.off;
+        break;
+      case FlashMode.off:
+        nextMode = FlashMode.auto;
+        break;
+      case FlashMode.torch:
+        nextMode = FlashMode.auto; // Unused but covered
+        break;
+    }
+    await _controller.setFlashMode(nextMode);
+    setState(() => _flashMode = nextMode);
+    await getIt<PreferencesService>().setCameraFlashMode(nextMode.name);
+  }
+
+  void _handleScaleUpdate(ScaleUpdateDetails details) async {
+    if (!_initialized) return;
+    
+    final zoomFactor = details.scale;
+    double newZoom = _currentZoomLevel * zoomFactor;
+
+    // Dampen the zoom speed to make it smoother
+    if (zoomFactor > 1) {
+      newZoom = _currentZoomLevel + 0.05;
+    } else if (zoomFactor < 1) {
+      newZoom = _currentZoomLevel - 0.05;
+    }
+
+    newZoom = newZoom.clamp(_minAvailableZoom, _maxAvailableZoom);
+    if (newZoom != _currentZoomLevel) {
+      try {
+        await _controller.setZoomLevel(newZoom);
+        _currentZoomLevel = newZoom;
+      } catch (e) {
+         // ignore
+      }
+    }
+  }
+
+  Future<void> _capture() async {
+    if (!_initialized || _capturing) return;
+    setState(() => _capturing = true);
+    try {
+      final file = await _controller.takePicture();
+      if (mounted) Navigator.pop(context, file.path);
+    } finally {
+      if (mounted) setState(() => _capturing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (_initialized)
+            GestureDetector(
+              onScaleUpdate: _handleScaleUpdate,
+              child: CameraPreview(_controller),
+            ),
+          if (!_initialized)
+            const Center(child: CircularProgressIndicator(color: Colors.white)),
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 12,
+            left: 16,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white, size: 28),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+          // Flash toggle
+          if (_initialized)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 12,
+              right: 16,
+              child: IconButton(
+                icon: Icon(
+                  _flashMode == FlashMode.always 
+                      ? Icons.flash_on_rounded
+                      : _flashMode == FlashMode.off
+                          ? Icons.flash_off_rounded
+                          : Icons.flash_auto_rounded,
+                  color: Colors.white,
+                  size: 28,
+                ),
+                onPressed: _toggleFlash,
+              ),
+            ),
+          Positioned(
+            bottom: 48,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: _capture,
+                child: Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 3),
+                    color: _capturing
+                        ? Colors.white.withValues(alpha: 0.5)
+                        : Colors.white.withValues(alpha: 0.2),
+                  ),
+                  child: _capturing
+                      ? const Padding(
+                          padding: EdgeInsets.all(20),
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2.5, color: Colors.white))
+                      : const Icon(Icons.camera_alt_rounded,
+                          color: Colors.white, size: 32),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Photo View Page ──────────────────────────────────────────
+
+/// Full-screen photo preview with zoom. Swipe down to close.
+class _PhotoViewPage extends StatelessWidget {
+  final String imagePath;
+  const _PhotoViewPage({required this.imagePath});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        onVerticalDragEnd: (details) {
+          if (details.primaryVelocity != null && details.primaryVelocity! > 300) {
+            Navigator.pop(context);
+          }
+        },
+        child: Stack(
+          children: [
+            PhotoView(
+              imageProvider: FileImage(File(imagePath)),
+              minScale: PhotoViewComputedScale.contained,
+              maxScale: PhotoViewComputedScale.covered * 3,
+              heroAttributes: PhotoViewHeroAttributes(tag: imagePath),
+            ),
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 8,
+              left: 8,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Toggle Widget ────────────────────────────────────────────
+
 class _Toggle extends StatelessWidget {
   final String label;
   final IconData icon;
@@ -586,9 +1026,7 @@ class _Toggle extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: EdgeInsets.zero,
-      decoration: const BoxDecoration(
-        color: Colors.transparent,
-      ),
+      decoration: const BoxDecoration(color: Colors.transparent),
       child: Row(
         children: [
           Icon(icon, size: 20, color: iconColor),

@@ -17,6 +17,28 @@ class AppConfig {
     defaultValue: false,
   );
 
+  // ─── Image compression ────────────────────────────────────
+  static const int imageMaxWidth = int.fromEnvironment(
+    'IMAGE_MAX_WIDTH',
+    defaultValue: 1280,
+  );
+
+  static const int imageMaxHeight = int.fromEnvironment(
+    'IMAGE_MAX_HEIGHT',
+    defaultValue: 960,
+  );
+
+  static const int imageQuality = int.fromEnvironment(
+    'IMAGE_QUALITY',
+    defaultValue: 85,
+  );
+
+  /// Target format: 'webp' or 'jpeg'
+  static const String imageFormat = String.fromEnvironment(
+    'IMAGE_FORMAT',
+    defaultValue: 'webp',
+  );
+
   static void validate() {
     if (apiBaseUrl.isEmpty) {
       throw Exception(

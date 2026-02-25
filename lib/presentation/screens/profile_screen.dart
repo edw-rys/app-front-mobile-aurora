@@ -15,6 +15,7 @@ import '../providers/meters_provider.dart';
 import '../providers/readings_provider.dart';
 import '../widgets/map_download_dialog.dart';
 import '../widgets/gps_onboarding_sheet.dart';
+import '../widgets/camera_onboarding_sheet.dart';
 
 import '../../app/di/injection.dart';
 import '../../data/services/local/preferences_service.dart';
@@ -30,6 +31,7 @@ class ProfileScreen extends ConsumerStatefulWidget {
 class _ProfileScreenState extends ConsumerState<ProfileScreen> with WidgetsBindingObserver {
   bool _autoSync = false;
   bool _hasLocationPermission = false;
+  bool _hasCameraPermission = false;
 
   @override
   void initState() {
@@ -54,8 +56,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> with WidgetsBindi
 
   Future<void> _checkPermission() async {
     final status = await Permission.locationWhenInUse.status;
+    final camStatus = await Permission.camera.status;
     if (mounted) {
-      setState(() => _hasLocationPermission = status.isGranted);
+      setState(() {
+        _hasLocationPermission = status.isGranted;
+        _hasCameraPermission = camStatus.isGranted;
+      });
     }
   }
 
@@ -263,6 +269,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> with WidgetsBindi
                 icon: Icons.location_on_outlined,
                 label: 'Permisos de ubicación',
                 onTap: () => GpsOnboardingSheet.show(context, onPermissionGranted: _checkPermission),
+              ),
+            ],
+            if (!_hasCameraPermission) ...[
+              const SizedBox(height: 8),
+              _buildActionTile(
+                context,
+                icon: Icons.camera_alt_outlined,
+                label: 'Permisos de cámara y archivos',
+                onTap: () => CameraOnboardingSheet.show(context, onPermissionGranted: _checkPermission),
               ),
             ],
             const SizedBox(height: 8),
