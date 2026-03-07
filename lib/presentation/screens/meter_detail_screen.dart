@@ -7,9 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:photo_view/photo_view.dart';
 import '../../core/constants/app_colors.dart';
-import '../../core/constants/app_strings.dart';
 import '../../core/utils/helpers.dart';
-import '../../core/utils/validators.dart';
 import '../../data/models/reading_model.dart';
 import '../../data/services/local/image_compression_service.dart';
 import '../providers/meters_provider.dart';
@@ -40,7 +38,9 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
   Timer? _indicatorTimer;
 
   String? _inputError;
+  bool _isHighConsumption = false;
   int? _prevReading;
+  int _consumptionThreshold = 100;
 
   final _imageService = ImageCompressionService();
   String? _localImagePath; // Path captured this session (may already be in reading)
@@ -61,7 +61,9 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
         _isDamaged = false;
         _isInaccessible = false;
         _inputError = null;
+        _isHighConsumption = false;
         _prevReading = null;
+        _consumptionThreshold = 100;
         _localImagePath = null;
         _photoExpanded = false;
       });
@@ -73,10 +75,12 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     final s = ref.read(metersProvider);
     final meter = s.meters.firstWhere((m) => m.nAbonado == widget.nAbonado);
     _prevReading = meter.reading.previousReading;
+    _consumptionThreshold = meter.reading.consumptionThreshold;
     final existing = s.readings[widget.nAbonado];
     if (existing != null) {
       if (existing.currentReading != null) {
         _readingController.text = existing.currentReading.toString();
+        _validateInput(_readingController.text);
       }
       _notesController.text = existing.notes ?? '';
       setState(() {
@@ -109,28 +113,47 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
   void _validateInput(String raw) {
     final text = raw.trim();
     if (text.isEmpty) {
-      setState(() => _inputError = null);
+      setState(() {
+        _inputError = null;
+        _isHighConsumption = false;
+      });
       return;
     }
     if (!RegExp(r'^\d+$').hasMatch(text)) {
-      setState(() => _inputError = 'Solo se admiten números');
+      setState(() {
+        _inputError = 'Solo se admiten números';
+        _isHighConsumption = false;
+      });
       return;
     }
     final val = int.tryParse(text);
     if (val == null) {
-      setState(() => _inputError = 'Número inválido');
+      setState(() {
+        _inputError = 'Número inválido';
+        _isHighConsumption = false;
+      });
       return;
     }
     if (val < 0) {
-      setState(() => _inputError = 'No puede ser negativo');
+      setState(() {
+        _inputError = 'No puede ser negativo';
+        _isHighConsumption = false;
+      });
       return;
     }
     final effectivePrev = _prevReading ?? 0;
     if (val < effectivePrev) {
-      setState(() => _inputError = 'Menor a la lectura anterior ($effectivePrev)');
+      setState(() {
+        _inputError = 'Menor a la lectura anterior ($effectivePrev)';
+        _isHighConsumption = false;
+      });
       return;
     }
-    setState(() => _inputError = null);
+    final consumption = val - effectivePrev;
+    setState(() {
+      _inputError = null;
+      _isHighConsumption = consumption > _consumptionThreshold;
+    });
   }
 
   bool get _hasImage => (_localImagePath != null && _localImagePath!.isNotEmpty);
@@ -158,13 +181,7 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     final s = ref.read(metersProvider);
     final meter = s.meters.firstWhere((m) => m.nAbonado == widget.nAbonado);
 
-    if (readingValue != null) {
-      final result = Validators.validateConsumption(readingValue, meter.reading.previousReading);
-      if (result == ConsumptionResult.high) {
-        final ok = await _showWarning(AppStrings.highConsumption, AppStrings.highConsumptionDesc);
-        if (!ok) return;
-      }
-    }
+    // High consumption is shown as an inline indicator; saving is always allowed.
 
     setState(() => _isSaving = true);
 
@@ -219,21 +236,6 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     }
   }
 
-  Future<bool> _showWarning(String title, String body) async {
-    return await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Text(title),
-            content: Text(body),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
-              ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Continuar')),
-            ],
-          ),
-        ) ??
-        false;
-  }
 
   /// Opens the camera, captures and compresses a photo
   Future<void> _capturePhoto() async {
@@ -303,6 +305,7 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     final displayIdx = idxInFiltered != -1 ? idxInFiltered + 1 : 0;
     final displayTotal = filtered.length;
     final prevReading = meter.reading.previousReading;
+    print(meter.reading.consumptionThreshold);
 
     final enablePhoto = s.enablePhoto;
     final requirePhoto = s.requirePhoto;
@@ -451,7 +454,37 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                         'Periodo: ${Helpers.formatDate(meter.reading.date)}',
                         style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
                       ),
-                      const SizedBox(height: 32),
+
+                      // ── High consumption warning (inline, non-blocking) ──
+                      if (_isHighConsumption) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.orange.shade300),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.warning_amber_rounded,
+                                  size: 16, color: Colors.orange.shade700),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  'El consumo es alto, supera los $_consumptionThreshold m³',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.orange.shade800),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+
+                      const SizedBox(height: 16),
 
                       // ── Collapsible photo section (when has image) ──
                       if (enablePhoto && _hasImage) ...[
@@ -562,39 +595,52 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                             ? Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const SizedBox(height: 16),
+                                  const SizedBox(height: 8),
                                   const Text('Notas',
                                       style: TextStyle(
                                           fontSize: 13,
                                           fontWeight: FontWeight.w600,
                                           color: Color(0xFF4A5568))),
-                                  const SizedBox(height: 6),
+                                  const SizedBox(height: 4),
                                   TextField(
                                     controller: _notesController,
-                                    maxLines: 3,
+                                    maxLines: null,
+                                    minLines: 1,
+                                    keyboardType: TextInputType.multiline,
+                                    style: const TextStyle(fontSize: 13),
                                     decoration: InputDecoration(
                                       hintText: 'Agrega una nota...',
+                                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                      isDense: true,
                                       border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(12)),
+                                          borderRadius: BorderRadius.circular(8)),
                                     ),
                                   ),
                                   const SizedBox(height: 12),
-                                  _Toggle(
-                                    label: 'Medidor dañado',
-                                    icon: Icons.warning_amber_rounded,
-                                    iconColor: Colors.orange,
-                                    value: _isDamaged,
-                                    onChanged: (v) => setState(() => _isDamaged = v),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: _CompactToggle(
+                                          label: 'Dañado',
+                                          icon: Icons.warning_amber_rounded,
+                                          iconColor: Colors.orange,
+                                          value: _isDamaged,
+                                          onChanged: (v) => setState(() => _isDamaged = v),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: _CompactToggle(
+                                          label: 'Inaccesible',
+                                          icon: Icons.block_rounded,
+                                          iconColor: Colors.red,
+                                          value: _isInaccessible,
+                                          onChanged: (v) => setState(() => _isInaccessible = v),
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(height: 8),
-                                  _Toggle(
-                                    label: 'Acceso imposible',
-                                    icon: Icons.block_rounded,
-                                    iconColor: Colors.red,
-                                    value: _isInaccessible,
-                                    onChanged: (v) => setState(() => _isInaccessible = v),
-                                  ),
-                                  const SizedBox(height: 8),
+                                  const SizedBox(height: 4),
                                 ],
                               )
                             : const SizedBox.shrink(),
@@ -1005,16 +1051,16 @@ class _PhotoViewPage extends StatelessWidget {
   }
 }
 
-// ─── Toggle Widget ────────────────────────────────────────────
+// ─── Compact Toggle Widget ───────────────────────────────────────
 
-class _Toggle extends StatelessWidget {
+class _CompactToggle extends StatelessWidget {
   final String label;
   final IconData icon;
   final Color iconColor;
   final bool value;
   final ValueChanged<bool> onChanged;
 
-  const _Toggle({
+  const _CompactToggle({
     required this.label,
     required this.icon,
     required this.iconColor,
@@ -1025,19 +1071,35 @@ class _Toggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: EdgeInsets.zero,
-      decoration: const BoxDecoration(color: Colors.transparent),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: value ? iconColor.withValues(alpha: 0.1) : Colors.transparent,
+        border: Border.all(
+          color: value ? iconColor.withValues(alpha: 0.3) : const Color(0xFFE2E8F0),
+        ),
+        borderRadius: BorderRadius.circular(8),
+      ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 20, color: iconColor),
-          const SizedBox(width: 12),
+          Icon(icon, size: 16, color: iconColor),
+          const SizedBox(width: 4),
           Expanded(
-              child: Text(label,
-                  style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14))),
-          Switch.adaptive(
-            value: value,
-            onChanged: onChanged,
-            activeColor: AppColors.primary,
+            child: Text(label,
+                style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 12),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+          ),
+          SizedBox(
+            height: 24, // restrict height
+            child: Transform.scale(
+              scale: 0.65, // make switch smaller
+              child: Switch.adaptive(
+                value: value,
+                onChanged: onChanged,
+                activeColor: iconColor,
+              ),
+            ),
           ),
         ],
       ),

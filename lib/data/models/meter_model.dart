@@ -171,12 +171,16 @@ class MeterReadingInfo {
   final int? currentReading;
   final int? previousReading;
   final int? consumption;
+  final int? avgConsumption;
+  final int consumptionThreshold;
   final String? date;
 
   const MeterReadingInfo({
     this.currentReading,
     this.previousReading,
     this.consumption,
+    this.avgConsumption,
+    this.consumptionThreshold = 100,
     this.date,
   });
 
@@ -185,6 +189,8 @@ class MeterReadingInfo {
       currentReading: json['current_reading'] as int?,
       previousReading: json['previous_reading'] as int?,
       consumption: json['consumption'] as int?,
+      avgConsumption: json['avg_consumption'] as int?,
+      consumptionThreshold: json['consumption_threshold'] as int? ?? 100,
       date: json['date'] as String?,
     );
   }
@@ -194,6 +200,8 @@ class MeterReadingInfo {
       'current_reading': currentReading,
       'previous_reading': previousReading,
       'consumption': consumption,
+      'avg_consumption': avgConsumption,
+      'consumption_threshold': consumptionThreshold,
       'date': date,
     };
   }
@@ -202,12 +210,16 @@ class MeterReadingInfo {
     int? currentReading,
     int? previousReading,
     int? consumption,
+    int? avgConsumption,
+    int? consumptionThreshold,
     String? date,
   }) {
     return MeterReadingInfo(
       currentReading: currentReading ?? this.currentReading,
       previousReading: previousReading ?? this.previousReading,
       consumption: consumption ?? this.consumption,
+      avgConsumption: avgConsumption ?? this.avgConsumption,
+      consumptionThreshold: consumptionThreshold ?? this.consumptionThreshold,
       date: date ?? this.date,
     );
   }

@@ -27,7 +27,13 @@ class Validators {
 
   /// Validate reading consumption
   /// Returns: 'negative', 'high', or 'ok'
-  static ConsumptionResult validateConsumption(int? currentReading, int? previousReading) {
+  /// [consumptionThreshold] is the max allowed consumption before flagging as high.
+  /// Defaults to 100 if not provided.
+  static ConsumptionResult validateConsumption(
+    int? currentReading,
+    int? previousReading, {
+    int consumptionThreshold = 100,
+  }) {
     if (currentReading == null) {
       return ConsumptionResult.ok;
     }
@@ -37,7 +43,8 @@ class Validators {
     if (consumption < 0) {
       return ConsumptionResult.negative;
     }
-    if (consumption > 100) {
+    print(consumption);
+    if (consumption > consumptionThreshold) {
       return ConsumptionResult.high;
     }
     return ConsumptionResult.ok;
