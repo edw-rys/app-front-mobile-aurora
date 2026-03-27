@@ -7,6 +7,7 @@ class MeterModel {
   final GeoModel geo;
   final MeterReadingInfo reading;
   final SectorModel? sector;
+  final InvoiceReconnectionModel? invoiceReconnection;
 
   const MeterModel({
     required this.clientName,
@@ -17,6 +18,7 @@ class MeterModel {
     required this.geo,
     required this.reading,
     this.sector,
+    this.invoiceReconnection,
   });
 
   factory MeterModel.fromJson(Map<String, dynamic> json) {
@@ -33,6 +35,10 @@ class MeterModel {
       sector: json['sector'] != null
           ? SectorModel.fromJson(json['sector'] as Map<String, dynamic>)
           : null,
+      invoiceReconnection: json['invoice_reconnection'] != null
+          ? InvoiceReconnectionModel.fromJson(
+              json['invoice_reconnection'] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -46,6 +52,7 @@ class MeterModel {
       'geo': geo.toJson(),
       'reading': reading.toJson(),
       'sector': sector?.toJson(),
+      'invoice_reconnection': invoiceReconnection?.toJson(),
     };
   }
 
@@ -58,6 +65,7 @@ class MeterModel {
     GeoModel? geo,
     MeterReadingInfo? reading,
     SectorModel? sector,
+    InvoiceReconnectionModel? invoiceReconnection,
   }) {
     return MeterModel(
       clientName: clientName ?? this.clientName,
@@ -68,6 +76,7 @@ class MeterModel {
       geo: geo ?? this.geo,
       reading: reading ?? this.reading,
       sector: sector ?? this.sector,
+      invoiceReconnection: invoiceReconnection ?? this.invoiceReconnection,
     );
   }
 }
@@ -222,5 +231,37 @@ class MeterReadingInfo {
       consumptionThreshold: consumptionThreshold ?? this.consumptionThreshold,
       date: date ?? this.date,
     );
+  }
+}
+
+class InvoiceReconnectionModel {
+  final int billInvoiceId;
+  final String billStatus;
+  final String billDate;
+  final String billFinalAmount;
+
+  const InvoiceReconnectionModel({
+    required this.billInvoiceId,
+    required this.billStatus,
+    required this.billDate,
+    required this.billFinalAmount,
+  });
+
+  factory InvoiceReconnectionModel.fromJson(Map<String, dynamic> json) {
+    return InvoiceReconnectionModel(
+      billInvoiceId: json['bill_invoiceid'] as int? ?? 0,
+      billStatus: json['bill_status'] as String? ?? '',
+      billDate: json['bill_date'] as String? ?? '',
+      billFinalAmount: json['bill_final_amount']?.toString() ?? '0.00',
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'bill_invoiceid': billInvoiceId,
+      'bill_status': billStatus,
+      'bill_date': billDate,
+      'bill_final_amount': billFinalAmount,
+    };
   }
 }

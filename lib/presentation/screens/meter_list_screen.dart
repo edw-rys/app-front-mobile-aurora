@@ -431,9 +431,24 @@ class _FastEntryCardState extends State<_FastEntryCard> {
     if (mounted) setState(() => _inputError = null);
   }
 
+  bool get _isHighConsumption {
+    final text = _ctrl.text.trim();
+    final val = int.tryParse(text);
+    if (val == null) return false;
+    final prev = widget.meter.reading.previousReading ?? 0;
+    final consumption = val - prev;
+    return consumption > widget.meter.reading.consumptionThreshold;
+  }
+
   void _onChanged(String value) {
     _debounce?.cancel();
     if (_inputError != null && mounted) setState(() => _inputError = null);
+
+    // If high consumption, do NOT auto-save. User must enter detail to add note.
+    if (_isHighConsumption) {
+      if (mounted) setState(() {}); // Refresh to show yellow warning
+      return;
+    }
 
     // When enablePhoto=true and requirePhoto=true, do NOT auto-save without image
     if (widget.enablePhoto && widget.requirePhoto) {
@@ -452,6 +467,9 @@ class _FastEntryCardState extends State<_FastEntryCard> {
     if (text.isEmpty) return;
     final val = int.tryParse(text);
     if (val == null) return;
+
+    // Block saving if high consumption (not allowed from list)
+    if (_isHighConsumption) return;
 
     setState(() => _saving = true);
     final reading = (widget.reading ?? ReadingModel(nAbonado: widget.meter.nAbonado)).copyWith(
@@ -518,18 +536,24 @@ class _FastEntryCardState extends State<_FastEntryCard> {
 
   @override
   Widget build(BuildContext context) {
+    final isHigh = _isHighConsumption;
+
     return GestureDetector(
       onTap: widget.onTap,
       child: Container(
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: _isRead ? Colors.white.withValues(alpha: 0.6) : Colors.white,
+          color: isHigh
+              ? const Color(0xFFFFFBEB) // Light yellow
+              : (_isRead ? Colors.white.withValues(alpha: 0.6) : Colors.white),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-              color: const Color(0xFFF1F5F9),
-              width: _isRead ? 1 : 1.5),
-          boxShadow: _isRead
+              color: isHigh
+                  ? const Color(0xFFFDE68A) // Yellow border
+                  : const Color(0xFFF1F5F9),
+              width: (isHigh || !_isRead) ? 1.5 : 1),
+          boxShadow: (_isRead && !isHigh)
               ? []
               : [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 8)],
         ),
@@ -541,13 +565,27 @@ class _FastEntryCardState extends State<_FastEntryCard> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Expanded(
-                  child: Text(widget.meter.clientName,
-                      style: TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 16,
-                          color: _isRead
-                              ? const Color(0xFF475569)
-                              : const Color(0xFF1E293B))),
+                  child: Row(
+                    children: [
+                      if (widget.meter.invoiceReconnection != null)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 6),
+                          child: Icon(Icons.warning_amber_rounded,
+                              size: 18, color: Colors.amber),
+                        ),
+                      Expanded(
+                        child: Text(widget.meter.clientName,
+                            style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 16,
+                                color: widget.meter.invoiceReconnection != null
+                                    ? Colors.red
+                                    : (_isRead
+                                        ? const Color(0xFF475569)
+                                        : const Color(0xFF1E293B)))),
+                      ),
+                    ],
+                  ),
                 ),
                 Row(
                   mainAxisSize: MainAxisSize.min,
@@ -577,7 +615,9 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                   style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w900,
-                      color: _isRead ? const Color(0xFF94A3B8) : AppColors.primary,
+                      color: widget.meter.invoiceReconnection != null
+                          ? Colors.red
+                          : (_isRead ? const Color(0xFF94A3B8) : AppColors.primary),
                       fontFamily: 'monospace'),
                 ),
                 const SizedBox(width: 6),
@@ -605,6 +645,34 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                 style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis),
+
+            if (isHigh) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF3C7),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded,
+                        size: 16, color: Color(0xFFB45309)),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Lectura muy alta, pulse aquí para entrar y agregar una observación',
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFFB45309)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
             const SizedBox(height: 12),
 
             // ── Input row ────────────────────────────────────
@@ -701,17 +769,19 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                 if (!widget.enablePhoto)
                   // Original save button (no photo mode)
                   GestureDetector(
-                    onTap: _isRead ? null : () { _debounce?.cancel(); _save(); },
+                    onTap: (_isRead || isHigh) ? null : () { _debounce?.cancel(); _save(); },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
                       width: 40,
                       height: 40,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: _isRead
-                            ? const Color(0xFFDCFCE7)
-                            : AppColors.primary,
-                        boxShadow: _isRead
+                        color: isHigh
+                            ? const Color(0xFFFDE68A)
+                            : (_isRead
+                                ? const Color(0xFFDCFCE7)
+                                : AppColors.primary),
+                        boxShadow: (_isRead || isHigh)
                             ? []
                             : [BoxShadow(color: AppColors.primary.withValues(alpha: 0.3), blurRadius: 8)],
                       ),
@@ -721,8 +791,12 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                               child: CircularProgressIndicator(
                                   strokeWidth: 2, color: Colors.white))
                           : Icon(
-                              _isRead ? Icons.done_all_rounded : Icons.check_rounded,
-                              color: _isRead ? const Color(0xFF22C55E) : Colors.white,
+                              isHigh
+                                  ? Icons.priority_high_rounded
+                                  : (_isRead ? Icons.done_all_rounded : Icons.check_rounded),
+                              color: isHigh
+                                  ? const Color(0xFFB45309)
+                                  : (_isRead ? const Color(0xFF22C55E) : Colors.white),
                               size: 20,
                             ),
                     ),
@@ -730,48 +804,54 @@ class _FastEntryCardState extends State<_FastEntryCard> {
                 else if (!_hasImage)
                   // Camera button (photo mode, no image yet)
                   GestureDetector(
-                    onTap: _saving ? null : _capturePhoto,
+                    onTap: (_saving || isHigh) ? null : _capturePhoto,
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
                       width: 40,
                       height: 40,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: const Color(0xFF06B6D4),
-                        boxShadow: [
-                          BoxShadow(
-                              color: const Color(0xFF06B6D4).withValues(alpha: 0.35),
-                              blurRadius: 8)
-                        ],
+                        color: isHigh ? const Color(0xFFFDE68A) : const Color(0xFF06B6D4),
+                        boxShadow: (isHigh)
+                            ? []
+                            : [
+                                BoxShadow(
+                                    color: const Color(0xFF06B6D4).withValues(alpha: 0.35),
+                                    blurRadius: 8)
+                              ],
                       ),
                       child: _saving
                           ? const Padding(
                               padding: EdgeInsets.all(10),
                               child: CircularProgressIndicator(
                                   strokeWidth: 2, color: Colors.white))
-                          : const Icon(Icons.camera_alt_rounded,
-                              color: Colors.white, size: 20),
+                          : Icon(
+                              isHigh ? Icons.priority_high_rounded : Icons.camera_alt_rounded,
+                              color: isHigh ? const Color(0xFFB45309) : Colors.white,
+                              size: 20),
                     ),
                   )
                 else
                   // Check / saved indicator (has image)
                   GestureDetector(
-                    onTap: _saving ? null : () { _debounce?.cancel(); _save(); },
+                    onTap: (_saving || (isHigh && widget.reading?.notes == null)) ? null : () { _debounce?.cancel(); _save(); },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
                       width: 40,
                       height: 40,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: const Color(0xFFDCFCE7),
+                        color: isHigh ? const Color(0xFFFDE68A) : const Color(0xFFDCFCE7),
                       ),
                       child: _saving
                           ? const Padding(
                               padding: EdgeInsets.all(10),
                               child: CircularProgressIndicator(
                                   strokeWidth: 2, color: Color(0xFF22C55E)))
-                          : const Icon(Icons.done_all_rounded,
-                              color: Color(0xFF22C55E), size: 20),
+                          : Icon(
+                              isHigh ? Icons.priority_high_rounded : Icons.done_all_rounded,
+                              color: isHigh ? const Color(0xFFB45309) : const Color(0xFF22C55E),
+                              size: 20),
                     ),
                   ),
               ],

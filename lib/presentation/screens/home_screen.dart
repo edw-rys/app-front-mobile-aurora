@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../core/constants/app_colors.dart';
+import '../../core/constants/app_strings.dart';
 import '../../shared/widgets/loading_overlay.dart';
 import '../../shared/widgets/skeleton_loader.dart';
 import '../providers/auth_provider.dart';
@@ -408,6 +409,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     textAlign: TextAlign.center),
                 const SizedBox(height: 24),
                 _primaryBtn(Icons.cloud_download_rounded, 'Obtener periodo de trabajo', _downloadWork),
+                const SizedBox(height: 32),
+                _buildVersionFooter(),
               ],
             ),
           ),
@@ -446,6 +449,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 const SizedBox(height: 12),
                 _plainBtn('Actualizar datos', _updateData),
                 _buildErrorsSection(ms),
+                const SizedBox(height: 32),
+                _buildVersionFooter(),
               ],
             ),
           ),
@@ -568,9 +573,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   const SizedBox(height: 10),
                   _plainBtn('Revisar lecturas antes de enviar', () => context.go('/meters')),
                   const SizedBox(height: 10),
-                  _plainBtn('Actualizar datos', _updateData),
+                _plainBtn('Actualizar datos', _updateData),
                 ],
                 _buildErrorsSection(ms),
+                const SizedBox(height: 32),
+                _buildVersionFooter(),
               ],
             ),
           ),
@@ -882,6 +889,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         SizedBox(height: 8),
         SkeletonMeterCard(),
       ]),
+    );
+  }
+
+  Widget _buildVersionFooter() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Text(
+        'v${AppStrings.appVersion}',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w500,
+          color: Colors.grey[400],
+        ),
+        textAlign: TextAlign.center,
+      ),
     );
   }
 }

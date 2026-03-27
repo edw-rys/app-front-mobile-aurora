@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:permission_handler/permission_handler.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_strings.dart';
 import '../../core/utils/validators.dart';
 import '../providers/auth_provider.dart';
-import '../widgets/gps_onboarding_sheet.dart';
+import '../../app/di/injection.dart';
+import '../../data/services/local/preferences_service.dart';
 
 /// Login screen matching mockup 1
 class LoginScreen extends ConsumerStatefulWidget {
@@ -21,6 +21,24 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _obscurePassword = true;
+  bool _rememberMe = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedEmail();
+  }
+
+  Future<void> _loadSavedEmail() async {
+    final prefs = getIt<PreferencesService>();
+    final email = await prefs.getRememberMeEmail();
+    if (email != null && mounted) {
+      setState(() {
+        _emailController.text = email;
+        _rememberMe = true;
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -38,6 +56,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         );
 
     if (success && mounted) {
+      final prefs = getIt<PreferencesService>();
+      if (_rememberMe) {
+        await prefs.saveRememberMeEmail(_emailController.text.trim());
+      } else {
+        await prefs.removeRememberMeEmail();
+      }
       context.go('/home');
     }
   }
@@ -126,6 +150,34 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 12),
+
+                  // Remember me checkbox
+                  Row(
+                    children: [
+                      SizedBox(
+                        height: 24,
+                        width: 24,
+                        child: Checkbox(
+                          value: _rememberMe,
+                          onChanged: (val) {
+                            setState(() => _rememberMe = val ?? false);
+                          },
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      GestureDetector(
+                        onTap: () => setState(() => _rememberMe = !_rememberMe),
+                        child: Text(
+                          'Recordarme',
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 16),
 
                   // Error message
@@ -182,6 +234,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                               ),
                             ),
                     ),
+                  ),
+                  const SizedBox(height: 32),
+
+                  // App version
+                  Text(
+                    'v${AppStrings.appVersion}',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: const Color(0xFF94A3B8),
+                        ),
+                    textAlign: TextAlign.center,
                   ),
                 ],
               ),

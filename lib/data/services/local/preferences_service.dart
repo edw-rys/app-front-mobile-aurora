@@ -17,6 +17,8 @@ class PreferencesService {
   static const String _cameraFlashModeKey = 'camera_flash_mode';
   static const String _enablePhotoKey = 'enable_photo';
   static const String _requirePhotoKey = 'require_photo';
+  static const String _rememberMeEmailKey = 'remember_me_email';
+  static const String _optionalSectionExpandedKey = 'optional_section_expanded';
 
   SharedPreferences? _prefs;
 
@@ -178,6 +180,36 @@ class PreferencesService {
   Future<String> getCameraFlashMode() async {
     final p = await prefs;
     return p.getString(_cameraFlashModeKey) ?? 'off'; // Default to off
+  }
+
+  // ─── Remember Me ──────────────────────────────────────────
+
+  Future<void> saveRememberMeEmail(String email) async {
+    final p = await prefs;
+    await p.setString(_rememberMeEmailKey, email);
+  }
+
+  Future<String?> getRememberMeEmail() async {
+    final p = await prefs;
+    return p.getString(_rememberMeEmailKey);
+  }
+
+  Future<void> removeRememberMeEmail() async {
+    final p = await prefs;
+    await p.remove(_rememberMeEmailKey);
+  }
+
+  // ─── UI State ─────────────────────────────────────────────
+
+  Future<void> setOptionalSectionExpanded(bool expanded) async {
+    final p = await prefs;
+    await p.setBool(_optionalSectionExpandedKey, expanded);
+  }
+
+  Future<bool> isOptionalSectionExpanded() async {
+    final p = await prefs;
+    // Default to true as per requirements
+    return p.getBool(_optionalSectionExpandedKey) ?? true;
   }
 
   // ─── Clear ────────────────────────────────────────────────

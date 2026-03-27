@@ -288,6 +288,14 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> with WidgetsBindi
               isDestructive: true,
               onTap: () => _handleLogout(context, ref),
             ),
+            const SizedBox(height: 32),
+            Text(
+              'v${AppStrings.appVersion}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.textTertiary,
+                  ),
+            ),
+            const SizedBox(height: 16),
           ],
         ),
       ),

@@ -48,7 +48,19 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadExistingReading());
+    _notesController.addListener(() => setState(() {}));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadExistingReading();
+      _loadUIState();
+    });
+  }
+
+  Future<void> _loadUIState() async {
+    final prefs = getIt<PreferencesService>();
+    final expanded = await prefs.isOptionalSectionExpanded();
+    if (mounted) {
+      setState(() => _optionalExpanded = expanded);
+    }
   }
 
   @override
@@ -163,6 +175,12 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
     if (_inputError != null || _isSaving) return false;
     // requirePhoto: must have image to save
     if (s.enablePhoto && s.requirePhoto && !_hasImage) return false;
+
+    // High consumption requirement: must have a note
+    if (_isHighConsumption && _notesController.text.trim().isEmpty) {
+      return false;
+    }
+
     return true;
   }
 
@@ -376,6 +394,24 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                         style: const TextStyle(fontSize: 12, color: Color(0xFF718096)),
                         textAlign: TextAlign.center,
                       ),
+                      if (meter.invoiceReconnection != null) ...[
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.warning_amber_rounded,
+                                size: 16, color: Colors.amber),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Hay un valor por reconexión el ${meter.invoiceReconnection!.billDate}',
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color.fromARGB(255, 177, 0, 0)),
+                            ),
+                          ],
+                        ),
+                      ],
                       const SizedBox(height: 28),
 
                       Row(
@@ -455,7 +491,7 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                         style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
                       ),
 
-                      // ── High consumption warning (inline, non-blocking) ──
+                      // ── High consumption warning (blocking if no note) ──
                       if (_isHighConsumption) ...[
                         const SizedBox(height: 8),
                         Container(
@@ -465,20 +501,36 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(color: Colors.orange.shade300),
                           ),
-                          child: Row(
+                          child: Column(
                             children: [
-                              Icon(Icons.warning_amber_rounded,
-                                  size: 16, color: Colors.orange.shade700),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  'El consumo es alto, supera los $_consumptionThreshold m³',
+                              Row(
+                                children: [
+                                  Icon(Icons.warning_amber_rounded,
+                                      size: 16, color: Colors.orange.shade700),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      'El consumo es alto, supera los $_consumptionThreshold m³',
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.orange.shade800),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (_notesController.text.trim().isEmpty) ...[
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'Debe agregar una observación para continuar',
                                   style: TextStyle(
                                       fontSize: 11,
                                       fontWeight: FontWeight.w600,
-                                      color: Colors.orange.shade800),
+                                      color: Colors.red),
                                 ),
-                              ),
+                                const SizedBox(height: 4),
+                                const _AnimatedArrow(),
+                              ],
                             ],
                           ),
                         ),
@@ -572,7 +624,13 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
 
                       // ── Collapsible "Opcional" ────────────────
                       GestureDetector(
-                        onTap: () => setState(() => _optionalExpanded = !_optionalExpanded),
+                        onTap: () {
+                          setState(() {
+                            _optionalExpanded = !_optionalExpanded;
+                            getIt<PreferencesService>()
+                                .setOptionalSectionExpanded(_optionalExpanded);
+                          });
+                        },
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -591,28 +649,59 @@ class _MeterDetailScreenState extends ConsumerState<MeterDetailScreen> {
                       AnimatedSize(
                         duration: const Duration(milliseconds: 300),
                         curve: Curves.easeInOut,
-                        child: _optionalExpanded
+                        child: (_optionalExpanded ||
+                                (_isHighConsumption && _notesController.text.trim().isEmpty))
                             ? Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const SizedBox(height: 8),
-                                  const Text('Notas',
+                                  Text(
+                                      (_isHighConsumption &&
+                                              _notesController.text.trim().isEmpty)
+                                          ? 'Notas (REQUERIDO)'
+                                          : 'Notas',
                                       style: TextStyle(
                                           fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                          color: Color(0xFF4A5568))),
+                                          fontWeight: (_isHighConsumption &&
+                                                  _notesController.text.trim().isEmpty)
+                                              ? FontWeight.w800
+                                              : FontWeight.w600,
+                                          color: (_isHighConsumption &&
+                                                  _notesController.text.trim().isEmpty)
+                                              ? Colors.red
+                                              : const Color(0xFF4A5568))),
                                   const SizedBox(height: 4),
                                   TextField(
                                     controller: _notesController,
                                     maxLines: null,
                                     minLines: 1,
+                                    autofocus: (_isHighConsumption &&
+                                        _notesController.text.trim().isEmpty),
                                     keyboardType: TextInputType.multiline,
                                     style: const TextStyle(fontSize: 13),
                                     decoration: InputDecoration(
                                       hintText: 'Agrega una nota...',
-                                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                      contentPadding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 10),
                                       isDense: true,
-                                      border: OutlineInputBorder(
+                                      enabledBorder: OutlineInputBorder(
+                                          borderSide: BorderSide(
+                                              color: (_isHighConsumption &&
+                                                      _notesController.text.trim().isEmpty)
+                                                  ? Colors.red
+                                                  : const Color(0xFFE2E8F0),
+                                              width: (_isHighConsumption &&
+                                                      _notesController.text.trim().isEmpty)
+                                                  ? 1.5
+                                                  : 1),
+                                          borderRadius: BorderRadius.circular(8)),
+                                      focusedBorder: OutlineInputBorder(
+                                          borderSide: BorderSide(
+                                              color: (_isHighConsumption &&
+                                                      _notesController.text.trim().isEmpty)
+                                                  ? Colors.red
+                                                  : AppColors.primary,
+                                              width: 2),
                                           borderRadius: BorderRadius.circular(8)),
                                     ),
                                   ),
@@ -1103,6 +1192,51 @@ class _CompactToggle extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AnimatedArrow extends StatefulWidget {
+  const _AnimatedArrow();
+
+  @override
+  State<_AnimatedArrow> createState() => _AnimatedArrowState();
+}
+
+class _AnimatedArrowState extends State<_AnimatedArrow>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 600),
+      vsync: this,
+    )..repeat(reverse: true);
+    _animation = Tween<double>(begin: 0, end: 10).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        return Padding(
+          padding: EdgeInsets.only(top: _animation.value),
+          child: const Icon(Icons.keyboard_double_arrow_down_rounded,
+              color: Colors.orange, size: 30),
+        );
+      },
     );
   }
 }

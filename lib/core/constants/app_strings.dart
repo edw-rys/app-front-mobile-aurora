@@ -4,7 +4,7 @@ class AppStrings {
 
   // App
   static const String appName = 'Aurora';
-  static const String appVersion = '1.0.0';
+  static const String appVersion = '1.0.0+2';
 
   // Auth
   static const String loginTitle = 'Inicia sesión';
