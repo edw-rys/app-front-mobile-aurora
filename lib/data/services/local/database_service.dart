@@ -8,7 +8,7 @@ import '../../models/reading_model.dart';
 class DatabaseService {
   static Database? _database;
   static const String _dbName = 'aurora_blue_e_dinky.db';
-  static const int _dbVersion = 6;
+  static const int _dbVersion = 7;
 
   Future<Database> get database async {
     _database ??= await _initDB();
@@ -86,6 +86,32 @@ class DatabaseService {
     await db.execute(
       'CREATE INDEX idx_sectors_period ON sectors(period_id)',
     );
+
+    // Location traces
+    await db.execute('''
+      CREATE TABLE location_traces (
+        period_id INTEGER PRIMARY KEY,
+        timezone TEXT NOT NULL,
+        uuid TEXT NOT NULL,
+        synced INTEGER DEFAULT 0
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE location_points (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        period_id INTEGER NOT NULL,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        read INTEGER DEFAULT 0,
+        n_abonado TEXT,
+        read_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute(
+      'CREATE INDEX idx_location_points_period ON location_points(period_id)',
+    );
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -135,6 +161,32 @@ class DatabaseService {
           'ALTER TABLE readings ADD COLUMN image_synced INTEGER DEFAULT 0',
         );
       } catch (_) {}
+    }
+    if (oldVersion < 7) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS location_traces (
+          period_id INTEGER PRIMARY KEY,
+          timezone TEXT NOT NULL,
+          uuid TEXT NOT NULL,
+          synced INTEGER DEFAULT 0
+        )
+      ''');
+
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS location_points (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          period_id INTEGER NOT NULL,
+          lat REAL NOT NULL,
+          lon REAL NOT NULL,
+          read INTEGER DEFAULT 0,
+          n_abonado TEXT,
+          read_at TEXT NOT NULL
+        )
+      ''');
+
+      await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_location_points_period ON location_points(period_id)',
+      );
     }
   }
 
@@ -601,6 +653,8 @@ class DatabaseService {
       await txn.delete('readings');
       await txn.delete('meters');
       await txn.delete('sectors');
+      await txn.delete('location_traces');
+      await txn.delete('location_points');
     });
   }
 
@@ -660,6 +714,105 @@ class DatabaseService {
     final db = await database;
     await db.close();
     _database = null;
+  }
+
+  // ─── Location Traces ─────────────────────────────────────
+
+  Future<void> saveLocationTraceInfo(int periodId, String timezone, String uuid) async {
+    final db = await database;
+    // Only insert if not yet present (preserve the original uuid for de-dup)
+    final existing = await db.query(
+      'location_traces',
+      where: 'period_id = ?',
+      whereArgs: [periodId],
+    );
+    if (existing.isEmpty) {
+      await db.insert(
+        'location_traces',
+        {
+          'period_id': periodId,
+          'timezone': timezone,
+          'uuid': uuid,
+          'synced': 0,
+        },
+      );
+    } else {
+      // Update timezone if needed but NEVER overwrite uuid
+      await db.update(
+        'location_traces',
+        {'timezone': timezone},
+        where: 'period_id = ?',
+        whereArgs: [periodId],
+      );
+    }
+  }
+
+  Future<void> saveLocationPoint(
+    int periodId,
+    double lat,
+    double lon,
+    bool read,
+    String? nAbonado,
+    String readAt,
+  ) async {
+    final db = await database;
+    await db.insert('location_points', {
+      'period_id': periodId,
+      'lat': lat,
+      'lon': lon,
+      'read': read ? 1 : 0,
+      'n_abonado': nAbonado,
+      'read_at': readAt,
+    });
+  }
+
+  Future<Map<String, dynamic>?> getLocationTrace(int periodId) async {
+    final db = await database;
+    
+    // Get trace info
+    final traceRows = await db.query(
+      'location_traces',
+      where: 'period_id = ? AND synced = 0',
+      whereArgs: [periodId],
+    );
+    
+    if (traceRows.isEmpty) return null;
+    
+    // Get points
+    final pointRows = await db.query(
+      'location_points',
+      where: 'period_id = ?',
+      whereArgs: [periodId],
+    );
+    
+    if (pointRows.isEmpty) return null;
+
+    final timezone = traceRows.first['timezone'] as String;
+    
+    final locations = pointRows.map((row) {
+      return {
+        'lat': row['lat'] as double,
+        'lon': row['lon'] as double,
+        'read': (row['read'] as int) == 1,
+        'n_abonado': row['n_abonado'] as String?,
+        'read_at': row['read_at'] as String,
+      };
+    }).toList();
+
+    return {
+      'reading_period_id': periodId,
+      'uuid': traceRows.first['uuid'] as String,
+      'timezone': timezone,
+      'locations': locations,
+    };
+  }
+
+  Future<void> clearLocationTrace(int periodId) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('location_points', where: 'period_id = ?', whereArgs: [periodId]);
+      await txn.delete('location_traces', where: 'period_id = ?', whereArgs: [periodId]);
+    });
   }
 
   // ─── Helpers ──────────────────────────────────────────────

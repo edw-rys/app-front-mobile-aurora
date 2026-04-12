@@ -8,6 +8,8 @@ import '../../core/exceptions/dio_exception_handler.dart';
 import '../../data/models/meter_model.dart';
 import '../../data/models/reading_model.dart';
 import '../../data/repositories/meter_repository.dart';
+import '../../data/repositories/location_trace_repository.dart';
+import '../../data/services/local/location_tracking_service.dart';
 import '../../data/services/local/preferences_service.dart';
 
 /// Meters state
@@ -137,12 +139,15 @@ class ReadingValidationResult {
 class MetersNotifier extends StateNotifier<MetersState> {
   final MeterRepository _meterRepo;
   final PreferencesService _prefsService;
+  final LocationTrackingService _trackingService;
 
   MetersNotifier({
     required MeterRepository meterRepo,
     required PreferencesService prefsService,
+    required LocationTrackingService trackingService,
   })  : _meterRepo = meterRepo,
         _prefsService = prefsService,
+        _trackingService = trackingService,
         super(const MetersState());
 
   /// Load meters from local DB
@@ -168,6 +173,11 @@ class MetersNotifier extends StateNotifier<MetersState> {
         enablePhoto: enablePhoto,
         requirePhoto: requirePhoto,
       );
+
+      // Start location tracking if there are meters (readings loaded)
+      if (meters.isNotEmpty) {
+        _trackingService.startTracking();
+      }
     } catch (e) {
       state = state.copyWith(
         isLoading: false,
@@ -178,12 +188,28 @@ class MetersNotifier extends StateNotifier<MetersState> {
 
   /// Mark work as started locally (no API call)
   Future<void> startWork() async {
+    // Request permissions for the foreground service
+    try {
+      await [
+        Permission.locationAlways,
+        Permission.notification,
+      ].request();
+    } catch (e) {
+      debugPrint('[MetersNotifier] Error requesting permissions: $e');
+    }
+
     await _prefsService.setWorkStarted(true);
     state = state.copyWith(isWorkStarted: true);
+    
+    // Start tracking immediately if meters already loaded
+    if (state.meters.isNotEmpty) {
+      await _trackingService.startTracking();
+    }
   }
 
   /// Restore data: clear all local DB data + reset prefs + reset in-memory state
   Future<void> resetAllData() async {
+    _trackingService.stopTracking();
     await _meterRepo.clearAllLocalData();
     await _prefsService.setWorkStarted(false);
     // Fully reset in-memory state so home screen immediately reflects empty state
@@ -308,6 +334,13 @@ class MetersNotifier extends StateNotifier<MetersState> {
     }
 
     await _meterRepo.saveReadingLocally(readingToSave);
+
+    // Mark location point with read = true immediately after saving a reading
+    try {
+      _trackingService.forceMarkReading(reading.nAbonado);
+    } catch (e) {
+      debugPrint('Error force-marking location for reading: $e');
+    }
 
     // Refresh readings map
     final updatedReadings = Map<String, ReadingModel>.from(state.readings);
@@ -434,9 +467,17 @@ class MetersNotifier extends StateNotifier<MetersState> {
       );
     }
 
+    // ── Step 3: Sync location trace ────────────────────────
+    try {
+      await getIt<LocationTraceRepository>().syncTrace(parentId);
+    } catch (e) {
+      debugPrint('Error syncing location trace: $e');
+    }
+
     // ── Close work period if no errors ────────────────────
     if (totalErrors == 0 && finalGlobalError == null) {
       await _prefsService.setWorkStarted(false);
+      _trackingService.stopTracking();
     }
 
     // Reload to reflect updated sync state
@@ -471,6 +512,7 @@ class MetersNotifier extends StateNotifier<MetersState> {
 
   /// Finalize the period on the server and clear local db
   Future<String> finishPeriod() async {
+    _trackingService.stopTracking();
     final message = await _meterRepo.finishPeriod();
     await resetAllData();
     return message;
@@ -482,6 +524,7 @@ final metersProvider = StateNotifierProvider<MetersNotifier, MetersState>((ref) 
   return MetersNotifier(
     meterRepo: getIt<MeterRepository>(),
     prefsService: getIt<PreferencesService>(),
+    trackingService: getIt<LocationTrackingService>(),
   );
 });
 

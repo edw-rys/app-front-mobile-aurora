@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import '../../../core/config/app_config.dart';
 import '../../../core/constants/endpoints.dart';
 import '../../models/meter_model.dart';
@@ -212,6 +213,17 @@ class ApiService {
       data: {
         'reading_period_id': readingPeriodId,
       },
+    );
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Post location trace
+  Future<Map<String, dynamic>> postLocationTrace({
+    required Map<String, dynamic> traceData,
+  }) async {
+    final response = await _dio.post(
+      Endpoints.locationTrace,
+      data: traceData,
     );
     return response.data as Map<String, dynamic>;
   }

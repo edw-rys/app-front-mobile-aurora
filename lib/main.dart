@@ -5,9 +5,17 @@ import 'app/di/injection.dart';
 import 'app/router/router.dart';
 import 'core/config/app_config.dart';
 import 'core/theme/app_theme.dart';
+import 'core/utils/background_service_utils.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize professional background tracking
+  try {
+    await BackgroundTrackingUtils.initializeService();
+  } catch (e) {
+    debugPrint('Error initializing background service: $e');
+  }
 
   // Validate environment configuration
   AppConfig.validate();

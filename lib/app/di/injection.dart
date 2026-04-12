@@ -1,7 +1,9 @@
 import 'package:get_it/get_it.dart';
 import '../../data/repositories/auth_repository.dart';
+import '../../data/repositories/location_trace_repository.dart';
 import '../../data/repositories/meter_repository.dart';
 import '../../data/services/local/database_service.dart';
+import '../../data/services/local/location_tracking_service.dart';
 import '../../data/services/local/preferences_service.dart';
 import '../../data/services/remote/api_service.dart';
 
@@ -35,6 +37,20 @@ Future<void> setupDependencies() async {
     () => MeterRepository(
       apiService: getIt<ApiService>(),
       dbService: getIt<DatabaseService>(),
+      prefsService: getIt<PreferencesService>(),
+    ),
+  );
+
+  getIt.registerLazySingleton<LocationTraceRepository>(
+    () => LocationTraceRepository(
+      dbService: getIt<DatabaseService>(),
+      apiService: getIt<ApiService>(),
+    ),
+  );
+
+  getIt.registerLazySingleton<LocationTrackingService>(
+    () => LocationTrackingService(
+      traceRepo: getIt<LocationTraceRepository>(),
       prefsService: getIt<PreferencesService>(),
     ),
   );

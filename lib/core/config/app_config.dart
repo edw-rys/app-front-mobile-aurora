@@ -39,6 +39,11 @@ class AppConfig {
     defaultValue: 'webp',
   );
 
+  static const int locationTrackingIntervalMinutes = int.fromEnvironment(
+    'LOCATION_TRACKING_INTERVAL_MINUTES',
+    defaultValue: 3,
+  );
+
   static void validate() {
     if (apiBaseUrl.isEmpty) {
       throw Exception(

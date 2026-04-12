@@ -17,4 +17,5 @@ class Endpoints {
   static const String readingsBulk = '/meters/readings/bulk';
   static const String readingsImage = '/meters/readings/image';
   static const String finishPeriod = '/meters/readings/finish-period';
+  static const String locationTrace = '/meters/location-trace';
 }
